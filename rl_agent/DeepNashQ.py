@@ -34,7 +34,7 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-class DeepNashQLearning:
+class DeepNashQ:
     def __init__(self, num_agents: int, state_dim: int, action_dim: int,
                  learning_rate: float = 0.001, gamma: float = 0.99,
                  epsilon: float = 0.1, device: torch.device = None,
