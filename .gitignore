@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+
+# Model checkpoints (optional, comment out if you want to track models)
+models/
+
+# Installer files
+*.deb
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/ 
