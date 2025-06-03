@@ -3,7 +3,7 @@ Main training script for the UAV MARL system using Deep Nash Q-learning.
 """
 import numpy as np
 from rl_agent.marl_env import MARLEnv
-from rl_agent.zoo_marl import DeepNashQLearning
+from rl_agent.DeepNashQ import DeepNashQLearning
 import torch
 import os
 from tqdm import tqdm
