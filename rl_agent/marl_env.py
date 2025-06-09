@@ -49,6 +49,14 @@ class MARLEnv(gym.Env):
         self.init_user_positions[:, 0] *= self.grid_size[0]
         self.init_user_positions[:, 1] *= self.grid_size[1]
         self.init_user_positions[:, 2] = 0
+
+        #additions for handover,cij
+        self.association = np.zeros(self.num_users, dtype=int)
+        self.prev_association = np.zeros(self.num_users, dtype=int)
+        self.handover_log = []
+        self.window_size = 5
+        self.handover_penalty = 2.0  
+
         
     def reset(self, seed=None) -> Tuple[np.ndarray, Dict]:
         """Reset the environment to initial state."""
@@ -61,6 +69,10 @@ class MARLEnv(gym.Env):
         self.target_positions[:, 1] *= self.grid_size[1]
         self.target_positions[:, 2] *= self.grid_size[2]
         self.user_positions = self.init_user_positions.copy()
+        self.association = np.zeros(self.num_users, dtype=int)
+        self.prev_association = np.zeros(self.num_users, dtype=int)
+        self.handover_log = []
+
         return self._get_observation(), {}
     
     def _get_observation(self) -> np.ndarray:
@@ -105,32 +117,52 @@ class MARLEnv(gym.Env):
         for i in range(self.num_uavs):
             distance = np.linalg.norm(self.uav_positions[i] - self.target_positions[i])
             reward -= distance
+        #  Handover penalty
+        handover_count = np.sum(self.association != self.prev_association)
+        reward -= handover_count * self.handover_penalty
         return reward
     
     def _compute_throughput(self) -> (float, np.ndarray):
         """Compute total network throughput (sum-rate) and per-user rates, associating each user to its nearest UAV."""
         total_rate = 0.0
         user_rates = np.zeros(self.num_users)
+        fading = np.random.exponential(1.0, size=(self.num_uavs, self.num_users))
+        new_association = np.zeros(self.num_users, dtype=int)
+        # Find nearest UAV for each user
         for user_idx in range(self.num_users):
             user_pos = self.user_positions[user_idx]
-            # Find nearest UAV
-            min_dist = float('inf')
-            nearest_uav = 0
-            for uav_idx in range(self.num_uavs):
-                uav_pos = self.uav_positions[uav_idx]
-                d = np.linalg.norm(user_pos - uav_pos)
-                if d < min_dist:
-                    min_dist = d
-                    nearest_uav = uav_idx
-            # Compute SNR for nearest UAV
-            uav_pos = self.uav_positions[nearest_uav]
-            d = np.linalg.norm(user_pos - uav_pos) + 1e-3
-            fading = np.random.exponential(1.0)
-            path_loss = d ** self.path_loss_exp
-            snr = (self.tx_power * fading) / (self.noise_power * path_loss)
-            rate = self.B * np.log2(1 + snr)
+            distances = np.linalg.norm(self.uav_positions - user_pos, axis=1)
+            new_association[user_idx] = np.argmin(distances)
+
+    # Track handovers (keep existing variable names)
+        self.prev_association = self.association.copy()
+        self.association = new_association
+
+        # Update handover log
+        handovers = (self.association != self.prev_association).astype(int)
+        self.handover_log.append(handovers)
+        if len(self.handover_log) > self.window_size:
+            self.handover_log.pop(0)
+
+        # Compute SINR-based rate
+        for user_idx in range(self.num_users):
+            uav_idx = self.association[user_idx]
+            user_pos = self.user_positions[user_idx]
+            uav_pos = self.uav_positions[uav_idx]
+            d_ij = np.linalg.norm(user_pos - uav_pos) + 1e-3
+            signal = self.tx_power * fading[uav_idx, user_idx] / (d_ij ** self.path_loss_exp)
+
+            interference = 0.0
+            for other_uav in range(self.num_uavs):
+                if other_uav != uav_idx:
+                    d_kj = np.linalg.norm(self.uav_positions[other_uav] - user_pos) + 1e-3
+                    interference += self.tx_power * fading[other_uav, user_idx] / (d_kj ** self.path_loss_exp)
+
+            sinr = signal / (self.noise_power + interference)
+            rate = self.B * np.log2(1 + sinr)
             user_rates[user_idx] = rate
             total_rate += rate
+
         return total_rate, user_rates
     
     def _move_users(self):
@@ -173,7 +205,8 @@ class MARLEnv(gym.Env):
             'altitude_violation': self._check_altitude_violations(),
             'qos_violation': qos_violation,
             'throughput': throughput,
-            'user_rates': user_rates
+            'user_rates': user_rates,
+            'handover_count': int(np.sum(self.association != self.prev_association))
         }
         done = self._check_collisions() or self._check_boundary_violations() or self._check_altitude_violations() or qos_violation
         return self._get_observation(), reward, done, False, info 
