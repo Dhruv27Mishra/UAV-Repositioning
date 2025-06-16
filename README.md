@@ -90,3 +90,19 @@ cd UAV-Repositioning-main
 2. Install dependencies:
 ```bash
 pip install -r requirements.txt
+
+```
+
+## Makefile Usage
+
+A `Makefile` is provided for convenience. Common targets:
+
+- `make install` – Install all Python dependencies
+- `make train` – Run the main training script
+- `make clean` – Remove Python bytecode and model checkpoints
+- `make help` – Show all available Makefile commands
+
+Example:
+```bash
+make train
+```

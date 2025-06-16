@@ -1,9 +1,9 @@
 """
-Main training script for the UAV MARL system using Deep Nash Q-learning.
+Main training script for the UAV MARL system using Qmix.
 """
 import numpy as np
 from rl_agent.marl_env import MARLEnv
-from rl_agent.DeepNashQ import DeepNashQ
+from rl_agent.Qmix.qmix import Qmix
 import torch
 import os
 from tqdm import tqdm
@@ -15,16 +15,19 @@ import subprocess
 def train(num_episodes=1000,
           num_uavs=7,
           grid_size=(10, 10, 5),
-          learning_rate=0.0003,
+          learning_rate_start=0.001,
+          learning_rate_end=0.0001,
+          learning_rate_decay=0.995,
           gamma=0.99,
           epsilon_start=1.0,
           epsilon_end=0.01,
           epsilon_decay=0.995,
           eval_interval=10,
           save_interval=50,
-          buffer_size=100000,
-          batch_size=128,
-          target_update=200):
+          buffer_size=10000,
+          batch_size=64,
+          target_update=100,
+          reward_scale=0.1):
     
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,21 +44,20 @@ def train(num_episodes=1000,
     state_dim = 3  # Each agent observes its own (x,y,z) position
     action_dim = env.action_space.nvec[0]
     
-    # Create Deep Nash Q-learning agent
-    marl = DeepNashQ(
-        num_agents=num_uavs,
+    # Initialize learning rate
+    learning_rate = learning_rate_start
+    
+    # Create Qmix agent
+    marl = Qmix(
+        num_uavs=num_uavs,
         state_dim=state_dim,
         action_dim=action_dim,
         learning_rate=learning_rate,
         gamma=gamma,
-        epsilon_start=epsilon_start,
-        epsilon_end=epsilon_end,
-        epsilon_decay=epsilon_decay,
-        device=device,
-        buffer_size=buffer_size,
-        batch_size=batch_size,
-        target_update=target_update
+        epsilon=epsilon_start,
+        device=device
     )
+    marl.to(device)
     
     # Training loop with progress bar
     pbar = tqdm(range(num_episodes), desc="Training")
@@ -65,6 +67,14 @@ def train(num_episodes=1000,
     episode_throughputs = []
     last_episode_log = {'uav_positions': [], 'user_positions': []}
     episode_end_positions = {'uav_positions': [], 'user_positions': []}
+    
+    # Initialize epsilon
+    epsilon = epsilon_start
+    
+    # Reward normalization variables
+    running_reward_mean = 0.0
+    running_reward_var = 1.0
+    reward_count = 1
     
     for episode in pbar:
         episode_start = time.time()
@@ -78,25 +88,35 @@ def train(num_episodes=1000,
         obs_tensor = torch.tensor(obs, device=device, dtype=torch.float32).view(1, num_uavs, -1)
         
         while not done:
-            # Get actions for all agents
-            actions = [marl.get_action(obs_tensor[0, i], i) for i in range(num_uavs)]
+            # Get actions for all agents with current epsilon
+            actions = [marl.get_action(obs_tensor[0:1], i, epsilon) for i in range(num_uavs)]
             
             # Step environment
             next_obs, reward, terminated, truncated, info = env.step(actions)
             done = terminated or truncated
             
+            # Scale reward
+            scaled_reward = reward * reward_scale
+            
+            # --- Reward normalization ---
+            # Update running mean/var (Welford's algorithm)
+            delta = scaled_reward - running_reward_mean
+            running_reward_mean += delta / reward_count
+            delta2 = scaled_reward - running_reward_mean
+            running_reward_var += delta * delta2
+            reward_count += 1
+            reward_std = max(np.sqrt(running_reward_var / reward_count), 1e-6)
+            normalized_reward = (scaled_reward - running_reward_mean) / reward_std
+            
             # Convert next observation to tensor and reshape for each agent
             next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32).view(1, num_uavs, -1)
             
-            # Store transition in replay buffer
-            marl.store_transition(obs_tensor, actions, [reward] * num_uavs, next_obs_tensor, [done] * num_uavs)
-            
             # Update Q-networks
-            marl.update(obs_tensor, torch.tensor(actions, device=device), reward, next_obs_tensor, done)
+            marl.update(obs_tensor, torch.tensor(actions, device=device), normalized_reward, next_obs_tensor, done)
             
             obs = next_obs
             obs_tensor = next_obs_tensor
-            episode_reward += reward
+            episode_reward += reward  # Use original reward for logging
             
             # Track collisions and throughput
             if info['collisions']:
@@ -109,19 +129,29 @@ def train(num_episodes=1000,
             if episode == num_episodes - 1:
                 env.log_step(last_episode_log)
         
+        # Decay epsilon and learning rate
+        epsilon = max(epsilon_end, epsilon * epsilon_decay)
+        learning_rate = max(learning_rate_end, learning_rate * learning_rate_decay)
+        
+        # Update optimizer learning rate
+        for param_group in marl.optimizer.param_groups:
+            param_group['lr'] = learning_rate
+        
         # Update progress bar with episode metrics
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',
             'collisions': episode_collisions,
             'throughput': f'{episode_throughput:.2f}',
             'total_collisions': total_collisions,
-            'total_throughput': f'{total_throughput:.2f}'
+            'total_throughput': f'{total_throughput:.2f}',
+            'epsilon': f'{epsilon:.3f}',
+            'lr': f'{learning_rate:.6f}'
         })
         
         # Save models periodically
         if (episode + 1) % save_interval == 0:
             os.makedirs("models", exist_ok=True)
-            marl.save(f"models/deep_nash_q_episode_{episode+1}.pt")
+            torch.save(marl.state_dict(), f"models/qmix_episode_{episode+1}.pt")
         
         episode_rewards.append(episode_reward)
         episode_throughputs.append(episode_throughput)
@@ -138,12 +168,12 @@ def train(num_episodes=1000,
     
     # Save final model
     os.makedirs("models", exist_ok=True)
-    marl.save("models/deep_nash_q_final.pt")
+    torch.save(marl.state_dict(), "models/qmix_final.pt")
     
     # Save rewards and throughputs
     os.makedirs("results", exist_ok=True)
-    np.save("results/deepnash_rewards.npy", np.array(episode_rewards))
-    np.save("results/deepnash_throughputs.npy", np.array(episode_throughputs))
+    np.save("results/qmix_rewards.npy", np.array(episode_rewards))
+    np.save("results/qmix_throughputs.npy", np.array(episode_throughputs))
     
     # Print final statistics
     print("\nTraining completed!")
