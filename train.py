@@ -3,7 +3,7 @@ Main training script for the UAV MARL system using Deep Nash Q-learning.
 """
 import numpy as np
 from rl_agent.marl_env import MARLEnv
-from rl_agent.DeepNashQ import DeepNashQLearning
+from rl_agent.DeepNashQ import DeepNashQ
 import torch
 import os
 from tqdm import tqdm
@@ -11,6 +11,11 @@ import time
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import subprocess
+def jains_fairness(user_rates):
+    user_rates = np.array(user_rates)
+    numerator = np.sum(user_rates) ** 2
+    denominator = len(user_rates) * np.sum(user_rates ** 2)
+    return numerator / denominator if denominator != 0 else 0
 
 def train(num_episodes=1000,
           num_uavs=7,
@@ -40,7 +45,7 @@ def train(num_episodes=1000,
     action_dim = env.action_space.nvec[0]
     
     # Create Deep Nash Q-learning agent
-    marl = DeepNashQLearning(
+    marl = DeepNashQ(
         num_agents=num_uavs,
         state_dim=state_dim,
         action_dim=action_dim,
@@ -59,6 +64,7 @@ def train(num_episodes=1000,
     total_throughput = 0.0
     episode_rewards = []
     episode_throughputs = []
+    episode_fairnesses= []
     last_episode_log = {'uav_positions': [], 'user_positions': []}
     episode_end_positions = {'uav_positions': [], 'user_positions': []}
     
@@ -105,6 +111,11 @@ def train(num_episodes=1000,
             episode_throughput += info['throughput']
             total_throughput += info['throughput']
             
+            if 'user_rates' in info:
+                episode_fairness = jains_fairness(info['user_rates'])
+            else:
+                episode_fairness = 0
+            episode_fairnesses.append(episode_fairness)
             # Log trajectory for last episode
             if episode == num_episodes - 1:
                 env.log_step(last_episode_log)
@@ -161,6 +172,14 @@ def train(num_episodes=1000,
     plt.xlabel('Episode')
     plt.ylabel('Throughput')
     plt.title('Throughput per Episode')
+    plt.figure()
+    plt.plot(episode_fairnesses)
+    plt.xlabel('Episode')
+    plt.ylabel("Jain's Fairness Index")
+    plt.title("Fairness per Episode")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
     plt.grid(True)
     plt.tight_layout()
     plt.show()
