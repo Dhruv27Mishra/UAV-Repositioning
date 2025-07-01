@@ -11,6 +11,11 @@ import time
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import subprocess
+def jains_fairness(user_rates):
+    user_rates = np.array(user_rates)
+    numerator = np.sum(user_rates) ** 2
+    denominator = len(user_rates) * np.sum(user_rates ** 2)
+    return numerator / denominator if denominator != 0 else 0
 
 def train(num_episodes=1000,
           num_uavs=7,
@@ -63,6 +68,7 @@ def train(num_episodes=1000,
     total_throughput = 0.0
     episode_rewards = []
     episode_throughputs = []
+    episode_fairnesses = []
     last_episode_log = {'uav_positions': [], 'user_positions': []}
     episode_end_positions = {'uav_positions': [], 'user_positions': []}
     
@@ -91,9 +97,10 @@ def train(num_episodes=1000,
             # Store transition in replay buffer
             marl.store_transition(obs_tensor, actions, [reward] * num_uavs, next_obs_tensor, [done] * num_uavs)
             
-            # Update Q-networks
-            marl.update(obs_tensor, torch.tensor(actions, device=device), reward, next_obs_tensor, done)
-            
+            if isinstance(reward, (list, np.ndarray)):
+                reward = np.mean(reward)  # or reward = float(np.mean(reward))
+                marl.update(obs_tensor, torch.tensor(actions, device=device), reward, next_obs_tensor, done)
+
             obs = next_obs
             obs_tensor = next_obs_tensor
             episode_reward += reward
@@ -103,12 +110,19 @@ def train(num_episodes=1000,
                 episode_collisions += 1
                 total_collisions += 1
             episode_throughput += info['throughput']
+            if 'user_rates' in info:
+                episode_fairness = jains_fairness(info['user_rates'])
+            else:
+                episode_fairness = 0
+            episode_fairnesses.append(episode_fairness)
+
             total_throughput += info['throughput']
             
             # Log trajectory for last episode
             if episode == num_episodes - 1:
                 env.log_step(last_episode_log)
-        
+         # replace XYZ with model name
+
         # Update progress bar with episode metrics
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',
@@ -139,7 +153,7 @@ def train(num_episodes=1000,
     # Save final model
     os.makedirs("models", exist_ok=True)
     marl.save("models/deep_nash_q_final.pt")
-    
+    np.save("results/deepnash_fairness.npy", np.array(episode_fairnesses))
     # Save rewards and throughputs
     os.makedirs("results", exist_ok=True)
     np.save("results/deepnash_rewards.npy", np.array(episode_rewards))
@@ -216,6 +230,41 @@ def train(num_episodes=1000,
     ani = animation.FuncAnimation(fig, update, frames=len(uav_traj), interval=400)
     plt.show()
     plt.close(fig)
+    window_size = 10
+    fairness_ma = np.convolve(episode_fairnesses, np.ones(window_size)/window_size, mode='valid')
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(episode_fairnesses, alpha=0.3, label='Raw Fairness')
+    plt.plot(range(window_size-1, len(episode_fairnesses)), fairness_ma, label='Moving Average')
+    plt.xlabel('Episode')
+    plt.ylabel("Jain's Fairness Index")
+    plt.title("Fairness per Episode")
+    plt.grid(True)
+    plt.legend()
+    plt.savefig("results/deepnash_fairness_curve.png")
+    plt.show()
+
+    user_counts = [10, 20, 30, 40, 50, 60]
+    fairness_scores = []
+
+    for num_users in user_counts:
+        env = MARLEnv(num_uavs=5, num_users=num_users)
+        env.reset()
+        _, user_rates = env._compute_throughput()  # Assumes it returns per-user rates
+        fairness = jains_fairness(user_rates)
+        fairness_scores.append(fairness)
+
+    # Plotting
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, fairness_scores, marker='o', linestyle='-', color='darkblue')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.ylabel("Jain's Fairness Index")
+    plt.title("Fairness vs UE Density")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("results/deepnash_fairness_vs_density.png")
+    plt.show()
+    np.save(f"results/deepnash_fairness_vs_density.npy", np.array(fairness_scores))
 
 if __name__ == "__main__":
     train() 

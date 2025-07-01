@@ -92,6 +92,58 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig('comparison_results.png', dpi=300, bbox_inches='tight')
 plt.show()
+deepnash_fairness = np.load("results/deepnash_fairness.npy")
+qmix_fairness = np.load("results/qmix_fairness.npy")
+vdn_fairness = np.load("results/vdn_fairness.npy")
+
+def smooth(y, window=20):
+    return np.convolve(y, np.ones(window)/window, mode='valid')
+
+# Smooth data
+window_size = 20
+dn_smooth = smooth(deepnash_fairness, window_size)
+qmix_smooth = smooth(qmix_fairness, window_size)
+vdn_smooth = smooth(vdn_fairness, window_size)
+x_vals = np.arange(len(dn_smooth))
+
+# Plot
+plt.figure(figsize=(12, 6))
+plt.plot(x_vals, dn_smooth, label="Deep NashQ", linewidth=2)
+plt.plot(x_vals, qmix_smooth, label="QMIX", linewidth=2)
+plt.plot(x_vals, vdn_smooth, label="VDN", linewidth=2)
+plt.xlabel("Episode")
+plt.ylabel("Jain's Fairness Index")
+plt.title("Fairness Comparison Across Algorithms")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig("results/fairness_comparison_smooth.png")
+plt.show()
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+user_counts = [10, 20, 30, 40, 50,60]
+
+# Load saved data
+deepnash_fairness = np.load("results/deepnash_fairness_vs_density.npy")
+qmix_fairness = np.load("results/qmix_fairness_vs_density.npy")
+vdn_fairness = np.load("results/vdn_fairness_vs_density.npy")
+
+# Plot
+plt.figure(figsize=(10, 6))
+plt.plot(user_counts, deepnash_fairness, marker='o', label='Deep NashQ')
+plt.plot(user_counts, qmix_fairness, marker='s', label='QMIX')
+plt.plot(user_counts, vdn_fairness, marker='^', label='VDN')
+
+plt.xlabel("Number of Users (UE Density)")
+plt.ylabel("Jain's Fairness Index")
+plt.title("Fairness vs UE Density (All Models)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("results/fairness_vs_density_all_models.png")
+plt.show()
 
 # Print detailed statistics
 print("\nDetailed Performance Statistics:")
