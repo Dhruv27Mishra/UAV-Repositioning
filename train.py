@@ -244,20 +244,30 @@ def train(num_episodes=1000,
     plt.savefig("results/deepnash_fairness_curve.png")
     plt.show()
 
-    user_counts = [10, 20, 30, 40, 50, 60]
+    user_counts = [1, 2, 3, 4, 5,6,7,8,9,10]
     fairness_scores = []
 
+    num_runs = 1000  # average over 1000 runs
+
     for num_users in user_counts:
-        env = MARLEnv(num_uavs=5, num_users=num_users)
-        env.reset()
-        _, user_rates = env._compute_throughput()  # Assumes it returns per-user rates
-        fairness = jains_fairness(user_rates)
-        fairness_scores.append(fairness)
+        total_fairness = 0
+        for _ in range(num_runs):
+            env = MARLEnv(num_uavs=5, num_users=num_users)
+            env.reset()
+            _, user_rates = env._compute_throughput()
+            fairness = jains_fairness(user_rates)
+            total_fairness += fairness
+
+        avg_fairness = total_fairness / num_runs
+        fairness_scores.append(avg_fairness)
+
+    np.save("results/deepnash_fairness_vs_density.npy", np.array(fairness_scores))
 
     # Plotting
     plt.figure(figsize=(8, 5))
     plt.plot(user_counts, fairness_scores, marker='o', linestyle='-', color='darkblue')
     plt.xlabel("Number of Users (UE Density)")
+    plt.xticks(user_counts)
     plt.ylabel("Jain's Fairness Index")
     plt.title("Fairness vs UE Density")
     plt.grid(True)

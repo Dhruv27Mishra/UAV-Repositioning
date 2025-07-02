@@ -123,7 +123,7 @@ plt.show()
 import numpy as np
 import matplotlib.pyplot as plt
 
-user_counts = [10, 20, 30, 40, 50,60]
+user_counts = [1, 2, 3, 4, 5,6,7,8,9,10]
 
 # Load saved data
 deepnash_fairness = np.load("results/deepnash_fairness_vs_density.npy")
@@ -137,6 +137,7 @@ plt.plot(user_counts, qmix_fairness, marker='s', label='QMIX')
 plt.plot(user_counts, vdn_fairness, marker='^', label='VDN')
 
 plt.xlabel("Number of Users (UE Density)")
+plt.xticks(user_counts)
 plt.ylabel("Jain's Fairness Index")
 plt.title("Fairness vs UE Density (All Models)")
 plt.grid(True)
