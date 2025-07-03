@@ -1,8 +1,14 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
-
+def jains_fairness(user_rates):
+        user_rates = np.array(user_rates)
+        numerator = np.sum(user_rates) ** 2
+        denominator = len(user_rates) * np.sum(user_rates ** 2)
+        return numerator / denominator if denominator != 0 else 0
 class DeterministicUAVSimulation:
+    
+
     def __init__(self, num_uavs=3, num_users=20, grid_size=(10, 10), uav_altitude=12.0, tx_power=1.0, noise_power=1e-3, path_loss_exp=2.5, bandwidth=1.0):
         self.num_uavs = num_uavs
         self.num_users = num_users
@@ -82,8 +88,36 @@ class DeterministicUAVSimulation:
 
 
 if __name__ == "__main__":
+    user_counts = [1,2,3,4,5,6,7,8,9,10]
+    fairness_scores = []
     sim = DeterministicUAVSimulation()
     total_throughput, user_rates = sim.run()
     print(f"Total Throughput: {total_throughput:.2f}")
     print(f"User Rates: {user_rates}")
     sim.visualize()
+    for num_users in user_counts:
+        total_fairness = 0
+        runs = 1000
+        for _ in range(runs):
+            sim = DeterministicUAVSimulation(num_users=num_users)
+            _, user_rates = sim.run()
+            total_fairness += jains_fairness(user_rates)
+        avg_fairness = total_fairness / runs
+        fairness_scores.append(avg_fairness)
+
+
+    # Plotting
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, fairness_scores, marker='o', linestyle='-', color='darkblue')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.xticks(user_rates)
+    plt.ylabel("Jain's Fairness Index")
+    plt.title("Fairness vs UE Density (Deterministic)")
+    plt.grid(True)
+    plt.xticks(user_counts)
+    plt.tight_layout()
+    plt.savefig("results/deterministic_fairness_vs_density.png")
+    plt.show()
+
+    # Save fairness values for later comparison
+    np.save("results/deterministic_fairness_vs_density.npy", np.array(fairness_scores))
