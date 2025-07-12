@@ -170,7 +170,39 @@ class AbidUAVSimulation:
         plt.legend()
         plt.grid(True)
         plt.show()
+def jains_fairness(user_rates):
+    user_rates = np.array(user_rates)
+    numerator = np.sum(user_rates) ** 2
+    denominator = len(user_rates) * np.sum(user_rates ** 2)
+    return numerator / denominator if denominator != 0 else 0
 
+def run_fairness_vs_density():
+    user_counts = [1, 2, 3, 4, 5]
+    fairness_scores = []
+    runs = 1000
+
+    for num_users in user_counts:
+        total_fairness = 0
+        for _ in range(runs):
+            sim = AbidUAVSimulation(num_uavs=5, num_users=num_users)
+            _, user_rates, _ = sim.run()
+            total_fairness += jains_fairness(user_rates)
+        avg_fairness = total_fairness / runs
+        fairness_scores.append(avg_fairness)
+
+    # Plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, fairness_scores, marker='o', linestyle='-', color='green')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.xticks(user_counts)
+    plt.ylabel("Jain's Fairness Index")
+    plt.title("Fairness vs UE Density (Abid Model)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("results/abid_fairness_vs_density.png")
+    plt.show()
+
+    np.save("results/abid_fairness_vs_density.npy", np.array(fairness_scores))
 def run_simulation(num_episodes=500, num_uavs=7, num_users=49):
     """Run Abid simulation for multiple episodes and save results."""
     sim = AbidUAVSimulation(num_uavs=num_uavs, num_users=num_users)
@@ -199,6 +231,34 @@ def run_simulation(num_episodes=500, num_uavs=7, num_users=49):
     print(f"Average collisions per episode: {total_collisions/num_episodes:.2f}")
     print(f"Average throughput per episode: {total_throughput/num_episodes:.2f}")
 
+def run_min_rate_vs_density():
+    user_counts = [1, 2, 3, 4, 5]
+    min_rates = []
+    runs = 1000
+
+    for num_users in user_counts:
+        total_min = 0
+        for _ in range(runs):
+            sim = AbidUAVSimulation(num_uavs=5, num_users=num_users)
+            _, user_rates, _ = sim.run()
+            total_min += np.min(user_rates)
+        avg_min = total_min / runs
+        min_rates.append(avg_min)
+
+    # Plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, min_rates, marker='^', color='darkgreen')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.xticks(user_counts)
+    plt.ylabel("Minimum Throughput per UE (Mbps)")
+    plt.title("Min Rate vs UE Density (Abid Model)")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("results/abid_min_rate_vs_density.png")
+    plt.show()
+
+    np.save("results/abid_min_rate_vs_density.npy", np.array(min_rates))   
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run Abid Deterministic Model for UAV positioning')
     parser.add_argument('--num_uavs', type=int, default=7, help='Number of UAVs')
@@ -206,5 +266,6 @@ if __name__ == "__main__":
     parser.add_argument('--num_episodes', type=int, default=500, help='Number of simulation episodes')
     
     args = parser.parse_args()
-    
+    run_fairness_vs_density()
     run_simulation(num_episodes=args.num_episodes, num_uavs=args.num_uavs, num_users=args.num_users) 
+    run_min_rate_vs_density()

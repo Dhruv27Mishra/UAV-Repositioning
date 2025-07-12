@@ -18,6 +18,8 @@ def jains_fairness(user_rates):
     numerator = np.sum(user_rates) ** 2
     denominator = len(user_rates) * np.sum(user_rates ** 2)
     return numerator / denominator if denominator != 0 else 0
+def get_min_user_rate(user_rates):
+    return np.min(user_rates)
 
 def train(num_episodes=1000,
           num_uavs=7,
@@ -277,7 +279,7 @@ def train(num_episodes=1000,
     plt.savefig("results/vdn_fairness_curve.png")  # or vdn_fairness_curve.png
     plt.show()
 
-    user_counts = [1, 2, 3, 4, 5,6,7,8,9,10]
+    user_counts = [1, 2, 3, 4, 5]
     fairness_scores = []
 
     num_runs = 1000  # average over 1000 runs
@@ -306,5 +308,35 @@ def train(num_episodes=1000,
     plt.savefig("results/vdn_fairness_vs_density.png")
     plt.show()
     
+    user_counts = [1, 2, 3, 4, 5]
+    min_rate_results = []
+
+    num_runs = 1000  # average over multiple resets
+
+    for num_users in user_counts:
+        total_min_rate = 0
+        for _ in range(num_runs):
+            env = MARLEnv(num_uavs=5, num_users=num_users)
+            env.reset()
+            _, user_rates = env._compute_throughput()
+            total_min_rate += get_min_user_rate(user_rates)
+        avg_min_rate = total_min_rate / num_runs
+        min_rate_results.append(avg_min_rate)
+
+    # Save result
+    np.save("results/XYZ_min_rate_vs_density.npy", np.array(min_rate_results))  # change XYZ to deepnash/qmix/vdn
+
+    # Plot
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, min_rate_results, marker='o', linestyle='-', color='darkred')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.ylabel("Minimum Throughput per UE (Mbps)")
+    plt.title("Minimum Throughput vs UE Density")
+    plt.grid(True)
+    plt.xticks(user_counts)
+    plt.tight_layout()
+    plt.savefig("results/vdn_min_rate_vs_density.png")  # change XYZ accordingly
+    plt.show()
+    np.save("results/vdn_min_rate_vs_density.npy", np.array(min_rate_results))  
 if __name__ == "__main__":
     train() 

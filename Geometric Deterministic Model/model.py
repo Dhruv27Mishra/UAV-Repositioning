@@ -85,10 +85,11 @@ class DeterministicUAVSimulation:
         plt.legend()
         plt.grid(True)
         plt.show()
+        
 
 
 if __name__ == "__main__":
-    user_counts = [1,2,3,4,5,6,7,8,9,10]
+    user_counts = [1,2,3,4,5]
     fairness_scores = []
     sim = DeterministicUAVSimulation()
     total_throughput, user_rates = sim.run()
@@ -121,3 +122,31 @@ if __name__ == "__main__":
 
     # Save fairness values for later comparison
     np.save("results/deterministic_fairness_vs_density.npy", np.array(fairness_scores))
+
+ 
+    min_rate_scores = []
+
+    for num_users in user_counts:
+        total_min_rate = 0
+        runs = 1000
+        for _ in range(runs):
+            sim = DeterministicUAVSimulation(num_users=num_users)
+            _, user_rates = sim.run()
+            total_min_rate += np.min(user_rates)
+        avg_min_rate = total_min_rate / runs
+        min_rate_scores.append(avg_min_rate)
+
+    # Plotting
+    plt.figure(figsize=(8, 5))
+    plt.plot(user_counts, min_rate_scores, marker='s', linestyle='-', color='darkred')
+    plt.xlabel("Number of Users (UE Density)")
+    plt.ylabel("Minimum Throughput per UE (Mbps)")
+    plt.title("Min Rate vs UE Density (Deterministic)")
+    plt.grid(True)
+    plt.xticks(user_counts)
+    plt.tight_layout()
+    plt.savefig("results/deterministic_min_rate_vs_density.png")
+    plt.show()
+
+    # Save result
+    np.save("results/deterministic_min_rate_vs_density.npy", np.array(min_rate_scores))

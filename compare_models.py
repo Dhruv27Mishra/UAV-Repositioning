@@ -95,7 +95,7 @@ plt.show()
 deepnash_fairness = np.load("results/deepnash_fairness.npy")
 qmix_fairness = np.load("results/qmix_fairness.npy")
 vdn_fairness = np.load("results/vdn_fairness.npy")
-# geo_fairness = np.load("results/deterministic_fairness.npy")
+#geo_fairness = np.load("results/deterministic_fairness.npy")
 
 def smooth(y, window=20):
     return np.convolve(y, np.ones(window)/window, mode='valid')
@@ -126,13 +126,14 @@ plt.show()
 import numpy as np
 import matplotlib.pyplot as plt
 
-user_counts = [1, 2, 3, 4, 5,6,7,8,9,10]
+user_counts = [1, 2, 3, 4, 5]
 
 # Load saved data
 deepnash_fairness = np.load("results/deepnash_fairness_vs_density.npy")
 qmix_fairness = np.load("results/qmix_fairness_vs_density.npy")
 vdn_fairness = np.load("results/vdn_fairness_vs_density.npy")
 geo_fairness = np.load("results/deterministic_fairness_vs_density.npy")
+abid_fairness = np.load("results/abid_fairness_vs_density.npy")
 
 # Plot
 plt.figure(figsize=(10, 6))
@@ -140,6 +141,7 @@ plt.plot(user_counts, deepnash_fairness, marker='o', label='Deep NashQ')
 plt.plot(user_counts, qmix_fairness, marker='s', label='QMIX')
 plt.plot(user_counts, vdn_fairness, marker='^', label='VDN')
 plt.plot(user_counts, geo_fairness, marker='.', label='Determinisitc 1')
+plt.plot(user_counts, abid_fairness, marker='.', label='Determinisitc 2')
 
 plt.xlabel("Number of Users (UE Density)")
 plt.xticks(user_counts)
@@ -151,6 +153,32 @@ plt.tight_layout()
 plt.savefig("results/fairness_vs_density_all_models.png")
 plt.show()
 
+user_counts = [1, 2, 3, 4, 5]
+
+# Load min rate data (average of 1000 runs per density)
+deepnash = np.load("results/deepnash_min_rate_vs_density.npy")
+qmix = np.load("results/qmix_min_rate_vs_density.npy")
+vdn = np.load("results/vdn_min_rate_vs_density.npy")
+abid = np.load("results/abid_min_rate_vs_density.npy")
+deterministic = np.load("results/deterministic_min_rate_vs_density.npy")
+
+# Plot
+plt.figure(figsize=(10, 6))
+plt.plot(user_counts, deepnash, marker='o', label='Deep NashQ')
+plt.plot(user_counts, qmix, marker='s', label='QMIX')
+plt.plot(user_counts, vdn, marker='^', label='VDN')
+plt.plot(user_counts, abid, marker='v', label='Abid Model')
+plt.plot(user_counts, deterministic, marker='x', label='Deterministic')
+
+plt.xlabel("Number of Users (UE Density)")
+plt.ylabel("Minimum Throughput per UE (Mbps)")
+plt.title("Minimum User Data Rate vs UE Density (All Models)")
+plt.legend()
+plt.grid(True)
+plt.xticks(user_counts)
+plt.tight_layout()
+plt.savefig("results/min_rate_vs_density_all_models.png")
+plt.show()
 # Print detailed statistics
 print("\nDetailed Performance Statistics:")
 print("-" * 50)
