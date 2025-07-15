@@ -8,7 +8,6 @@ def jains_fairness(user_rates):
         return numerator / denominator if denominator != 0 else 0
 class DeterministicUAVSimulation:
     
-
     def __init__(self, num_uavs=3, num_users=20, grid_size=(10, 10), uav_altitude=12.0, tx_power=1.0, noise_power=1e-3, path_loss_exp=2.5, bandwidth=1.0):
         self.num_uavs = num_uavs
         self.num_users = num_users

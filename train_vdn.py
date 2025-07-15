@@ -182,7 +182,7 @@ def train(num_episodes=1000,
         # End of episode: store the new positions for animation
         episode_end_positions['uav_positions'].append(env.uav_positions.copy())
         episode_end_positions['user_positions'].append(env.user_positions.copy())
-    np.save("results/vdn_fairness.npy", np.array(episode_fairnesses))  # change to vdn_fairness.npy in train_vdn.py
+    np.save("results/vdn_fairness.npy", np.array(episode_fairnesses))  
 
     # Save final model
     os.makedirs("models", exist_ok=True)
@@ -205,7 +205,7 @@ def train(num_episodes=1000,
     plt.figure(figsize=(12, 5))
     
     # Calculate moving averages
-    window_size = 20  # Adjust this value to control smoothing
+    window_size = 20  
     rewards_ma = np.convolve(episode_rewards, np.ones(window_size)/window_size, mode='valid')
     throughputs_ma = np.convolve(episode_throughputs, np.ones(window_size)/window_size, mode='valid')
     
@@ -276,14 +276,13 @@ def train(num_episodes=1000,
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    plt.savefig("results/vdn_fairness_curve.png")  # or vdn_fairness_curve.png
+    plt.savefig("results/vdn_fairness_curve.png")  
     plt.show()
 
     user_counts = [1, 2, 3, 4, 5]
     fairness_scores = []
 
-    num_runs = 1000  # average over 1000 runs
-
+    num_runs = 1000 
     for num_users in user_counts:
         total_fairness = 0
         for _ in range(num_runs):
@@ -311,7 +310,7 @@ def train(num_episodes=1000,
     user_counts = [1, 2, 3, 4, 5]
     min_rate_results = []
 
-    num_runs = 1000  # average over multiple resets
+    num_runs = 1000 
 
     for num_users in user_counts:
         total_min_rate = 0
@@ -324,7 +323,7 @@ def train(num_episodes=1000,
         min_rate_results.append(avg_min_rate)
 
     # Save result
-    np.save("results/XYZ_min_rate_vs_density.npy", np.array(min_rate_results))  # change XYZ to deepnash/qmix/vdn
+    np.save("results/XYZ_min_rate_vs_density.npy", np.array(min_rate_results))  
 
     # Plot
     plt.figure(figsize=(8, 5))
@@ -335,7 +334,7 @@ def train(num_episodes=1000,
     plt.grid(True)
     plt.xticks(user_counts)
     plt.tight_layout()
-    plt.savefig("results/vdn_min_rate_vs_density.png")  # change XYZ accordingly
+    plt.savefig("results/vdn_min_rate_vs_density.png")  
     plt.show()
     np.save("results/vdn_min_rate_vs_density.npy", np.array(min_rate_results))  
 if __name__ == "__main__":

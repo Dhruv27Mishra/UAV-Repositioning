@@ -124,8 +124,7 @@ def train(num_episodes=1000,
             # Log trajectory for last episode
             if episode == num_episodes - 1:
                 env.log_step(last_episode_log)
-         # replace XYZ with model name
-
+       
         # Update progress bar with episode metrics
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',
@@ -250,7 +249,7 @@ def train(num_episodes=1000,
     user_counts = [1, 2, 3, 4, 5]
     fairness_scores = []
 
-    num_runs = 1000  # average over 1000 runs
+    num_runs = 1000  
 
     for num_users in user_counts:
         total_fairness = 0
@@ -282,7 +281,7 @@ def train(num_episodes=1000,
     user_counts = [1, 2, 3, 4, 5]
     min_rate_results = []
 
-    num_runs = 1000  # average over multiple resets
+    num_runs = 1000  
 
     for num_users in user_counts:
         total_min_rate = 0
@@ -295,7 +294,7 @@ def train(num_episodes=1000,
         min_rate_results.append(avg_min_rate)
 
     # Save result
-    np.save("results/XYZ_min_rate_vs_density.npy", np.array(min_rate_results))  # change XYZ to deepnash/qmix/vdn
+    np.save("results/XYZ_min_rate_vs_density.npy", np.array(min_rate_results))  
 
     # Plot
     plt.figure(figsize=(8, 5))
@@ -306,7 +305,7 @@ def train(num_episodes=1000,
     plt.grid(True)
     plt.xticks(user_counts)
     plt.tight_layout()
-    plt.savefig("results/deepnash_min_rate_vs_density.png")  # change XYZ accordingly
+    plt.savefig("results/deepnash_min_rate_vs_density.png")  
     plt.show()
     np.save("results/deepnash_min_rate_vs_density.npy", np.array(min_rate_results))  
 

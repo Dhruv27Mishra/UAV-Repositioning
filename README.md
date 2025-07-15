@@ -1,108 +1,83 @@
-# UAV-MARL: Multi-Agent RL for UAV-Assisted Wireless Networks
+UAV-Assisted Wi-Fi Networks: Fairness and Coverage Optimization
+This repository provides a simulation framework and reinforcement learning environment to evaluate different UAV coordination algorithms for Wi-Fi coverage in rural or dense environments. It focuses on throughput optimization, Jain’s fairness, and worst-case user experience (max-min fairness).
 
-This repository implements a simulation framework for optimizing UAV-assisted wireless communication networks using **multi-agent reinforcement learning (MARL)**. The goal is to manage UAV mobility, user association, and trajectory planning under realistic wireless channel models and CSMA-based access constraints.
+📦 Contents
+graphql
+Copy
+Edit
+├── marl_env.py                 # Multi-agent UAV environment (RL)
+├── train.py                   # Deep NashQ training and fairness logging
+├── train_qmix.py              # QMIX training and evaluation
+├── train_vdn.py               # VDN training and evaluation
+├── model.py                   # Deterministic UAV baseline
+├── abid_model.py              # Custom alternative UAV positioning model
+├── compare_models.py          # Plots comparison of fairness, min-rate, etc.
+├── results/                   # Stores .npy results and plots
+🚁 Problem Overview
+We simulate multiple tethered UAVs acting as Wi-Fi access points (IEEE 802.11ac), each serving mobile ground users. The UAVs dynamically reposition to maximize network performance under various constraints.
 
-## Project Overview
+🎯 Goals
+✅ Maximize total network throughput
 
-- **Architecture**: Multiple UAVs act as mobile Wi-Fi APs (IEEE 802.11ac).
-- **Objective**: Maximize user throughput under SINR-based interference modeling.
-- **Control**: UAVs are coordinated using centralized RL agents.
-- **MAC Layer**: CSMA/CA behavior is abstracted via simplified SINR models.
+✅ Ensure fair access via Jain’s Fairness Index
 
-## Modules
+✅ Improve worst-case user experience (min throughput)
 
-### 1. `initialization/`
-- Initializes UAV and user positions.
-- Sets parameters like altitude, power, coverage area.
+✅ Compare RL-based strategies with deterministic baselines
 
-### 2. `mobility_model/`
-- Simulates UAV movement across time steps.
-- Optionally integrates mobility constraints (e.g., max speed).
+📊 Metrics Tracked
+Metric	Description
+Throughput	Total user data rate across the network
+Jain's Fairness Index	Measures equity of rate distribution
+Minimum UE Throughput	Max-min fairness: how the worst user performs
+Gini Index (optional)	Measures rate inequality (like in economics)
 
-### 3. `channel_model/`
-- Computes path loss, Rayleigh fading, and interference.
-- Outputs SINR values for all UAV-user pairs.
+🧪 Experiments
+1. Fairness vs. UE Density
+Plots how Jain’s fairness changes as the number of users increases.
 
-### 4. `rl_agent/`
-- Contains the multi-agent RL logic.
-- Agents learn UAV positions and association policies over episodes.
+2. Minimum Throughput vs. UE Density
+Plots how the worst-off user is treated as network load increases.
 
-### 5. `trajectory_planner/`
-- Uses RL outputs to compute UAV 2D/3D movement plans.
+3. Multi-model Comparison
+Compare:
 
-### 6. `association_policy/`
-- Determines which UAV serves each user at time \( t \).
-- Enforces single association constraint and QoS.
+Deep NashQ
 
-### 7. `handover_control/`
-- Tracks user-UAV reassociation and applies handover suppression logic.
+QMIX
 
-### 8. `evaluation/`
-- Logs system metrics: total throughput, SINR heatmaps, user satisfaction.
-- Plots per-episode training performance.
+VDN
 
-## Problem Statement
+Deterministic SINR-based policy
 
-In a wireless network, UAVs (Unmanned Aerial Vehicles) are deployed to provide coverage and connectivity to ground users. The goal is to dynamically reposition the UAVs to maximize network performance (e.g., throughput, QoS) while satisfying constraints such as collision avoidance, boundary limits, and altitude restrictions.
+Abid’s custom baseline
 
-## Formulations
+📈 Results
+Plots are automatically saved in /results:
 
-### Environment
-- **Grid Size**: 3D grid (default: 10x10x5).
-- **UAVs**: Each UAV is an agent that can move in 6 directions (up, down, left, right, forward, backward).
-- **Users**: Ground users with minimal random movement (simulating movement inside homes).
-- **Initial Positions**: UAVs and users have fixed random initial positions for the entire training run.
+*_fairness_vs_density.png
 
-### Constraints
-- **Collision Avoidance**: UAVs must maintain a minimum distance from each other.
-- **Boundary Limits**: UAVs must stay within the grid boundaries.
-- **Altitude Constraints**: UAVs must maintain an altitude between 10 and 15 meters.
+*_min_rate_vs_density.png
 
-### Reward Structure
-- **Positive Reward**: Bonus for each user meeting the QoS requirement (default: +10.0 per user per step).
-- **Negative Penalties**:
-  - Collision penalty (default: -100.0).
-  - Boundary violation penalty (default: -50.0).
-  - Altitude violation penalty (default: -50.0).
-- **Distance-based Penalty**: Negative reward based on the distance between each UAV and its target position.
+fairness_vs_density_all_models.png
 
-### User Association
-- Each user is associated with its nearest UAV (minimum Euclidean distance).
-- This association is used for throughput calculation and visualization.
+min_rate_vs_density_all_models.png
 
-## Requirements
+🛠 How to Run
+Train and log fairness:
+python train.py          # Deep NashQ
+python train_qmix.py     # QMIX
+python train_vdn.py      # VDN
+Run deterministic baseline:
+python model.py
+Run Abid's baseline:
+python abid_model.py
+Compare all models:
+python compare_models.py
+📚 Citation
+If you use this code for academic purposes, please cite the repository and include credit to the original authors.
 
-- Python 3.8+
-- PyTorch
-- NumPy
-- Gymnasium
-- Matplotlib
-- tqdm
+🤝 Acknowledgements
+IEEE 802.11ac reference for Wi-Fi modeling
 
-## Installation
-
-1. Clone the repository:
-```bash
-git clone <repo-url>
-cd UAV-Repositioning-main
-```
-
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-
-```
-
-## Makefile Usage
-
-A `Makefile` is provided for convenience. Common targets:
-
-- `make install` – Install all Python dependencies
-- `make train` – Run the main training script
-- `make clean` – Remove Python bytecode and model checkpoints
-- `make help` – Show all available Makefile commands
-
-Example:
-```bash
-make train
-```
+Jain et al. (1984) for fairness metric
