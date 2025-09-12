@@ -1,108 +1,153 @@
-# UAV-MARL: Multi-Agent RL for UAV-Assisted Wireless Networks
+# 🚁 UAV-Assisted Wi-Fi Coverage Optimization using Multi-Agent Reinforcement Learning
 
-This repository implements a simulation framework for optimizing UAV-assisted wireless communication networks using **multi-agent reinforcement learning (MARL)**. The goal is to manage UAV mobility, user association, and trajectory planning under realistic wireless channel models and CSMA-based access constraints.
+> **Multi-agent reinforcement learning (MARL) meets UAV-based Wi-Fi coverage.** This repository implements Deep Nash Q-learning, QMIX, and VDN algorithms to optimize UAV positioning and user association, outperforming deterministic models under mobility and interference.
+---
 
-## Project Overview
+## 📄 Paper Summary
 
-- **Architecture**: Multiple UAVs act as mobile Wi-Fi APs (IEEE 802.11ac).
-- **Objective**: Maximize user throughput under SINR-based interference modeling.
-- **Control**: UAVs are coordinated using centralized RL agents.
-- **MAC Layer**: CSMA/CA behavior is abstracted via simplified SINR models.
+**📝 Title:** Optimizing Throughput in Wi-Fi enabled UAV Network using Multi-agent Reinforcement Learning  
+**👥 Authors:** Parshav Pagaria, Dhruv Mishra, Souvik Deb, Santosh Nagraj, Mahasweta Sarkar, Shankar K. Ghosh  
+**🏛️ Affiliations:**  
+- San Diego State University, USA  
+- Shiv Nadar Institution of Eminence, India  
 
-## Modules
+**🔍 Abstract:**  
+This paper introduces a **decentralized MARL framework** to optimize UAV positions and user association in **Wi-Fi-enabled aerial networks**. The environment includes UAV collisions, handover frequency, and transmission failures. Three MARL models—**VDN**, **QMIX**, and **DeepNashQ**—were compared with two deterministic baselines. Results show that **QMIX consistently achieves superior throughput, fairness, and minimum user rate** under user mobility and interference.
 
-### 1. `initialization/`
-- Initializes UAV and user positions.
-- Sets parameters like altitude, power, coverage area.
+📌 **Best Performer:** QMIX  
+📌 **Key Metrics:** Throughput, Jain’s Fairness, LBT, Goodness  
+📌 **IEEE Standard:** 802.11ac (Wi-Fi 5)  
+📌 
 
-### 2. `mobility_model/`
-- Simulates UAV movement across time steps.
-- Optionally integrates mobility constraints (e.g., max speed).
+---
 
-### 3. `channel_model/`
-- Computes path loss, Rayleigh fading, and interference.
-- Outputs SINR values for all UAV-user pairs.
+## 📁 Project Structure
+├── train.py # Deep Nash Q-learning agent 
 
-### 4. `rl_agent/`
-- Contains the multi-agent RL logic.
-- Agents learn UAV positions and association policies over episodes.
+├── train_qmix.py # QMIX algorithm
 
-### 5. `trajectory_planner/`
-- Uses RL outputs to compute UAV 2D/3D movement plans.
+├── train_vdn.py # VDN algorithm
 
-### 6. `association_policy/`
-- Determines which UAV serves each user at time \( t \).
-- Enforces single association constraint and QoS.
+├── model.py # SINR-based deterministic strategy
 
-### 7. `handover_control/`
-- Tracks user-UAV reassociation and applies handover suppression logic.
+├── abid_model.py # Custom baseline (Deterministic II)
 
-### 8. `evaluation/`
-- Logs system metrics: total throughput, SINR heatmaps, user satisfaction.
-- Plots per-episode training performance.
+├── compare_models.py # Generate performance plots
 
-## Problem Statement
+├── results/ # Raw data and plot images (.npy, .png)
 
-In a wireless network, UAVs (Unmanned Aerial Vehicles) are deployed to provide coverage and connectivity to ground users. The goal is to dynamically reposition the UAVs to maximize network performance (e.g., throughput, QoS) while satisfying constraints such as collision avoidance, boundary limits, and altitude restrictions.
+├── requirements.txt # Python dependencies
 
-## Formulations
+├── LICENSE, Makefile, .gitignore
 
-### Environment
-- **Grid Size**: 3D grid (default: 10x10x5).
-- **UAVs**: Each UAV is an agent that can move in 6 directions (up, down, left, right, forward, backward).
-- **Users**: Ground users with minimal random movement (simulating movement inside homes).
-- **Initial Positions**: UAVs and users have fixed random initial positions for the entire training run.
 
-### Constraints
-- **Collision Avoidance**: UAVs must maintain a minimum distance from each other.
-- **Boundary Limits**: UAVs must stay within the grid boundaries.
-- **Altitude Constraints**: UAVs must maintain an altitude between 10 and 15 meters.
+---
 
-### Reward Structure
-- **Positive Reward**: Bonus for each user meeting the QoS requirement (default: +10.0 per user per step).
-- **Negative Penalties**:
-  - Collision penalty (default: -100.0).
-  - Boundary violation penalty (default: -50.0).
-  - Altitude violation penalty (default: -50.0).
-- **Distance-based Penalty**: Negative reward based on the distance between each UAV and its target position.
+## 🧠 Problem Statement
 
-### User Association
-- Each user is associated with its nearest UAV (minimum Euclidean distance).
-- This association is used for throughput calculation and visualization.
+Positioning UAVs for **Wi-Fi coverage** and user association is challenging due to:
+- 🌀 User mobility
+- 📶 Inter-UAV interference
+- 📡 Real-time throughput and fairness constraints
 
-## Requirements
+We aim to:
+- Maximize **system throughput**
+- Optimize **worst-case user experience**
+- Evaluate learning-based vs rule-based UAV coordination
 
-- Python 3.8+
-- PyTorch
-- NumPy
-- Gymnasium
-- Matplotlib
-- tqdm
+---
 
-## Installation
+## 🔍 Algorithms Compared
 
-1. Clone the repository:
-```bash
-git clone <repo-url>
-cd UAV-Repositioning-main
-```
+| Model              | Type              | Description |
+|-------------------|-------------------|-------------|
+| **Deep Nash Q**    | Game-Theoretic MARL | Learns Nash equilibrium strategies for cooperative behavior |
+| **QMIX**           | Value-based MARL   | Nonlinear value mixing for complex agent interactions |
+| **VDN**            | Value-based MARL   | Linear decomposition of Q-values per agent |
+| **Deterministic I**| SINR-based         | Greedy placement with static strategy |
+| **Deterministic II**| Geometry-based     | Circle-packing trajectory baseline |
 
-2. Install dependencies:
+---
+
+## 📊 Evaluation Metrics
+
+| Metric             | Description |
+|--------------------|-------------|
+| 📶 **Total Throughput** | Sum of all user data rates |
+| ⚖️ **Jain’s Fairness Index** | Measures equity in throughput |
+| ⬇️ **Minimum User Rate (LBT)** | Worst-case UE experience |
+| 💡 **Goodness** | Fraction of UEs above throughput threshold |
+| ❌ **Collision Count** | UAV physical overlap incidents |
+
+---
+
+## 🖼️ Visual Results
+
+### Learning Curves and Performance Summary
+![Results](comparison_results.png)
+
+---
+
+## 🚀 Getting Started
+
+### 🔧 Setup Environment
 ```bash
 pip install -r requirements.txt
 
+🏋️ Train RL Models
+
+python train.py        # Deep Nash Q
+python train_qmix.py   # QMIX
+python train_vdn.py    # VDN
+
+🔬 Run Baseline Models
+
+python model.py        # Deterministic I
+python abid_model.py   # Deterministic II
+
+📈 Compare Models
+python compare_models.py
+📁 Plots and data saved in /results
+
+📦 Dependencies
+
+Python 3.8+
+PyTorch ≥ 1.9.0
+Gymnasium ≥ 0.26.0
+NumPy, Matplotlib, Pandas, SciPy, tqdm
+pip install -r requirements.txt
+
+🔬 Simulation Environment
+
+3D grid: 10×10×5 m³
+UAVs fly at fixed altitudes (10m, 15m)
+Wi-Fi standard: IEEE 802.11ac (CSMA/CA)
+Dynamic UE mobility (random waypoint)
+TDMA-based user scheduling
+Evaluation over 1000+ episodes with statistical significance
 ```
+📚 References
 
-## Makefile Usage
+IEEE 802.11ac Wi-Fi standard
+Jain’s Index for Fairness [DEC TR-301]
+QMIX [ICML 2018], VDN [AAMAS 2018], Deep Nash Q-learning [JMLR 2003]
+Bianchi’s model for 802.11 throughput analysis
 
-A `Makefile` is provided for convenience. Common targets:
+🪪 License
 
-- `make install` – Install all Python dependencies
-- `make train` – Run the main training script
-- `make clean` – Remove Python bytecode and model checkpoints
-- `make help` – Show all available Makefile commands
+This repository is licensed under the MIT License. See LICENSE for details.
 
-Example:
-```bash
-make train
-```
+🙌 Acknowledgements
+
+We thank the research advisors and collaborators from SDSU and Shiv Nadar Institution of Eminence for their guidance.
+
+🔗 Citation
+
+If you use this code or paper in your work, please cite:
+
+@article{pagaria2025uav,
+  title={Optimizing Throughput in Wi-Fi enabled UAV Network using Multi-agent Reinforcement Learning},
+  author={Pagaria, Parshav and Mishra, Dhruv and Deb, Souvik and Nagraj, Santosh and Sarkar, Mahasweta and Ghosh, Shankar K.},
+  journal={arXiv preprint arXiv:XXXX.XXXXX},  
+  year={2025}
+}
