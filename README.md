@@ -72,7 +72,6 @@ We aim to:
 | Metric             | Description |
 |--------------------|-------------|
 | 📶 **Total Throughput** | Sum of all user data rates |
-| ⚖️ **Jain’s Fairness Index** | Measures equity in throughput |
 | ⬇️ **Minimum User Rate (LBT)** | Worst-case UE experience |
 | 💡 **Goodness** | Fraction of UEs above throughput threshold |
 | ❌ **Collision Count** | UAV physical overlap incidents |
