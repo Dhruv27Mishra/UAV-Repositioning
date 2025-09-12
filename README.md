@@ -15,10 +15,8 @@
 This paper introduces a **decentralized MARL framework** to optimize UAV positions and user association in **Wi-Fi-enabled aerial networks**. The environment includes UAV collisions, handover frequency, and transmission failures. Three MARL models—**VDN**, **QMIX**, and **DeepNashQ**—were compared with two deterministic baselines. Results show that **QMIX consistently achieves superior throughput, fairness, and minimum user rate** under user mobility and interference.
 
 📌 **Best Performer:** QMIX  
-📌 **Key Metrics:** Throughput, Jain’s Fairness, LBT, Goodness  
+📌 **Key Metrics:** Throughput, LBT, Goodness  
 📌 **IEEE Standard:** 802.11ac (Wi-Fi 5)  
-📌 
-
 ---
 
 ## 📁 Project Structure
