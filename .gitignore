@@ -14,4 +14,15 @@ models/
 *.deb
 
 # Jupyter Notebook checkpoints
-.ipynb_checkpoints/ 
+.ipynb_checkpoints/
+
+# Generated test images
+*.png
+!comparison_results.png
+
+# Test results
+test_*.png
+ue_density_*.png
+version_comparison.png
+height_analysis.png
+marl_comparison_all.png 

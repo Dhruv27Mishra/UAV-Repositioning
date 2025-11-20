@@ -22,9 +22,10 @@ class MARLEnv(gym.Env):
         self.action_space = spaces.MultiDiscrete([6] * num_uavs)
         
         # Define observation space (x, y, z coordinates for each UAV)
+        # Note: z (height) can now vary in expanded range [5, 50] meters
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 0] * num_uavs),
-            high=np.array([grid_size[0], grid_size[1], grid_size[2]] * num_uavs),
+            low=np.array([0, 0, 5] * num_uavs),
+            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs),
             dtype=np.float32
         )
         
@@ -39,12 +40,27 @@ class MARLEnv(gym.Env):
         self.B = 1.0  # Bandwidth (arbitrary units)
         self.noise_power = 1e-3
         self.tx_power = 1.0
-        self.path_loss_exp = 2.5
+        self.path_loss_exp_los = 2.0  # Path loss exponent for LOS (lower due to clear path)
+        self.path_loss_exp_nlos = 3.5  # Path loss exponent for NLOS (higher due to obstacles)
+        
+        # Height-dependent LOS probability parameters
+        # At lower altitude, LOS blocked by obstacles; at higher altitude, LOS increases
+        # After threshold, distance-based path loss dominates
+        self.los_prob_base = 0.1  # Base LOS probability at ground level
+        self.los_prob_max = 0.95  # Maximum LOS probability at optimal height
+        self.optimal_height = 20.0  # Approximate optimal height (meters) where LOS probability peaks
+        self.height_sensitivity = 0.15  # Controls how quickly LOS probability changes with height
+        self.height_decay_factor = 0.02  # Controls decay after optimal height
+        
+        # Shadowing/fading parameters
+        self.shadowing_std_los = 3.0  # Shadowing standard deviation for LOS (dB)
+        self.shadowing_std_nlos = 8.0  # Shadowing standard deviation for NLOS (dB)
         # Fixed initial UAV and user positions (random, but fixed for the run)
         self.init_uav_positions = np.random.rand(self.num_uavs, 3)
         self.init_uav_positions[:, 0] *= self.grid_size[0]
         self.init_uav_positions[:, 1] *= self.grid_size[1]
-        self.init_uav_positions[:, 2] *= self.grid_size[2]
+        # Initialize heights in range [10, 30] meters to start near optimal region
+        self.init_uav_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
         self.init_user_positions = np.random.rand(self.num_users, 3)
         self.init_user_positions[:, 0] *= self.grid_size[0]
         self.init_user_positions[:, 1] *= self.grid_size[1]
@@ -67,7 +83,8 @@ class MARLEnv(gym.Env):
         self.target_positions = np.random.rand(self.num_uavs, 3)
         self.target_positions[:, 0] *= self.grid_size[0]
         self.target_positions[:, 1] *= self.grid_size[1]
-        self.target_positions[:, 2] *= self.grid_size[2]
+        # Target heights in range [10, 30] meters
+        self.target_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
         self.user_positions = self.init_user_positions.copy()
         self.association = np.zeros(self.num_users, dtype=int)
         self.prev_association = np.zeros(self.num_users, dtype=int)
@@ -95,13 +112,73 @@ class MARLEnv(gym.Env):
         return np.any(x < 0) or np.any(x >= self.grid_size[0]) or np.any(y < 0) or np.any(y >= self.grid_size[1])
     
     def _check_altitude_violations(self) -> bool:
-        """Check if any UAV is outside the allowed altitude range [10, 15] meters."""
+        """Check if any UAV is outside the allowed altitude range [5, 50] meters.
+        Expanded range to allow learning optimal height."""
         z = self.uav_positions[:, 2]
-        return np.any(z < 10) or np.any(z > 15)
+        return np.any(z < 5) or np.any(z > 50)
     
     def _check_qos_violations(self, user_rates: np.ndarray) -> bool:
         """Check if any user rate is below the minimum required rate (QoS)."""
         return np.any(user_rates < self.min_user_rate)
+    
+    def _compute_los_probability(self, uav_height: float) -> float:
+        """
+        Compute LOS probability based on UAV height.
+        
+        At lower altitude, LOS can be blocked by obstacles (buildings, trees).
+        At higher altitude, LOS probability increases.
+        After optimal height, distance-based path loss dominates.
+        
+        Args:
+            uav_height: Height of the UAV in meters
+            
+        Returns:
+            LOS probability in [0, 1]
+        """
+        if uav_height < 5:
+            # Very low altitude, high blockage probability
+            return self.los_prob_base
+        
+        # LOS probability increases with height up to optimal height
+        if uav_height <= self.optimal_height:
+            # Increasing phase: LOS probability grows with height
+            height_factor = (uav_height - 5) / (self.optimal_height - 5)
+            los_prob = self.los_prob_base + (self.los_prob_max - self.los_prob_base) * (
+                1 - np.exp(-self.height_sensitivity * height_factor * (self.optimal_height - 5))
+            )
+        else:
+            # Decreasing phase: After optimal height, distance-based path loss dominates
+            # LOS probability still high but slightly decreases due to increased distance
+            excess_height = uav_height - self.optimal_height
+            los_prob = self.los_prob_max * np.exp(-self.height_decay_factor * excess_height)
+        
+        return np.clip(los_prob, self.los_prob_base, self.los_prob_max)
+    
+    def _compute_path_loss(self, distance: float, is_los: bool, uav_height: float) -> float:
+        """
+        Compute path loss based on LOS/NLOS state and distance.
+        
+        Args:
+            distance: 3D distance between UAV and user
+            is_los: Boolean indicating LOS or NLOS state
+            uav_height: Height of UAV (for additional height-dependent loss)
+            
+        Returns:
+            Path loss factor (to be divided from signal power)
+        """
+        if is_los:
+            path_loss_exp = self.path_loss_exp_los
+        else:
+            path_loss_exp = self.path_loss_exp_nlos
+        
+        # Base path loss: distance^path_loss_exp
+        base_path_loss = distance ** path_loss_exp
+        
+        # Additional height-dependent loss factor (small effect)
+        # At very high altitudes, additional loss due to increased distance
+        height_loss_factor = 1.0 + 0.01 * max(0, uav_height - self.optimal_height)
+        
+        return base_path_loss * height_loss_factor
     
     def _calculate_reward(self, user_rates=None) -> float:
         reward = 0.0
@@ -123,18 +200,21 @@ class MARLEnv(gym.Env):
         return reward
     
     def _compute_throughput(self) -> (float, np.ndarray):
-        """Compute total network throughput (sum-rate) and per-user rates, associating each user to its nearest UAV."""
+        """
+        Compute total network throughput (sum-rate) and per-user rates, associating each user to its nearest UAV.
+        Incorporates height-dependent LOS probability and path loss models.
+        """
         total_rate = 0.0
         user_rates = np.zeros(self.num_users)
-        fading = np.random.exponential(1.0, size=(self.num_uavs, self.num_users))
         new_association = np.zeros(self.num_users, dtype=int)
-        # Find nearest UAV for each user
+        
+        # Find nearest UAV for each user (based on 3D distance)
         for user_idx in range(self.num_users):
             user_pos = self.user_positions[user_idx]
             distances = np.linalg.norm(self.uav_positions - user_pos, axis=1)
             new_association[user_idx] = np.argmin(distances)
 
-    # Track handovers (keep existing variable names)
+        # Track handovers (keep existing variable names)
         self.prev_association = self.association.copy()
         self.association = new_association
 
@@ -144,20 +224,62 @@ class MARLEnv(gym.Env):
         if len(self.handover_log) > self.window_size:
             self.handover_log.pop(0)
 
-        # Compute SINR-based rate
+        # Compute SINR-based rate with height-dependent LOS and path loss
         for user_idx in range(self.num_users):
             uav_idx = self.association[user_idx]
             user_pos = self.user_positions[user_idx]
             uav_pos = self.uav_positions[uav_idx]
+            uav_height = uav_pos[2]
+            
+            # Compute 3D distance
             d_ij = np.linalg.norm(user_pos - uav_pos) + 1e-3
-            signal = self.tx_power * fading[uav_idx, user_idx] / (d_ij ** self.path_loss_exp)
+            
+            # Determine LOS/NLOS state based on height-dependent probability
+            los_prob = self._compute_los_probability(uav_height)
+            is_los = np.random.random() < los_prob
+            
+            # Compute path loss based on LOS/NLOS state
+            path_loss = self._compute_path_loss(d_ij, is_los, uav_height)
+            
+            # Compute shadowing/fading (different for LOS vs NLOS)
+            if is_los:
+                # LOS: lower shadowing variance
+                shadowing_db = np.random.normal(0, self.shadowing_std_los)
+            else:
+                # NLOS: higher shadowing variance
+                shadowing_db = np.random.normal(0, self.shadowing_std_nlos)
+            
+            # Convert shadowing from dB to linear scale
+            shadowing_linear = 10 ** (shadowing_db / 10.0)
+            
+            # Signal power with path loss and shadowing
+            signal = self.tx_power * shadowing_linear / path_loss
 
+            # Compute interference from other UAVs
             interference = 0.0
             for other_uav in range(self.num_uavs):
                 if other_uav != uav_idx:
-                    d_kj = np.linalg.norm(self.uav_positions[other_uav] - user_pos) + 1e-3
-                    interference += self.tx_power * fading[other_uav, user_idx] / (d_kj ** self.path_loss_exp)
+                    other_uav_pos = self.uav_positions[other_uav]
+                    other_uav_height = other_uav_pos[2]
+                    d_kj = np.linalg.norm(other_uav_pos - user_pos) + 1e-3
+                    
+                    # Determine LOS/NLOS for interfering link
+                    other_los_prob = self._compute_los_probability(other_uav_height)
+                    other_is_los = np.random.random() < other_los_prob
+                    
+                    # Compute path loss for interfering link
+                    other_path_loss = self._compute_path_loss(d_kj, other_is_los, other_uav_height)
+                    
+                    # Shadowing for interfering link
+                    if other_is_los:
+                        other_shadowing_db = np.random.normal(0, self.shadowing_std_los)
+                    else:
+                        other_shadowing_db = np.random.normal(0, self.shadowing_std_nlos)
+                    other_shadowing_linear = 10 ** (other_shadowing_db / 10.0)
+                    
+                    interference += self.tx_power * other_shadowing_linear / other_path_loss
 
+            # Compute SINR and rate
             sinr = signal / (self.noise_power + interference)
             rate = self.B * np.log2(1 + sinr)
             user_rates[user_idx] = rate
@@ -177,18 +299,22 @@ class MARLEnv(gym.Env):
     def step(self, actions: List[int]) -> Tuple[np.ndarray, float, bool, bool, Dict]:
         """Take a step in the environment."""
         # Convert actions to movements
+        # Height movements are in meters (1m steps for fine control)
         movements = {
-            0: np.array([0, 0, 1]),   # up
-            1: np.array([0, 0, -1]),  # down
-            2: np.array([0, 1, 0]),   # right
-            3: np.array([0, -1, 0]),  # left
-            4: np.array([1, 0, 0]),   # forward
-            5: np.array([-1, 0, 0])   # backward
+            0: np.array([0, 0, 1.0]),   # up (increase height)
+            1: np.array([0, 0, -1.0]),  # down (decrease height)
+            2: np.array([0, 1, 0]),     # right
+            3: np.array([0, -1, 0]),    # left
+            4: np.array([1, 0, 0]),     # forward
+            5: np.array([-1, 0, 0])     # backward
         }
         
         # Update UAV positions
         for i, action in enumerate(actions):
             self.uav_positions[i] += movements[action]
+        
+        # Clip heights to valid range [5, 50] meters
+        self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
         
         # Move users minimally before reward/throughput calculation
         self._move_users()

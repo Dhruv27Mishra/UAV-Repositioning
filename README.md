@@ -20,23 +20,30 @@ This paper introduces a **decentralized MARL framework** to optimize UAV positio
 ---
 
 ## 📁 Project Structure
-├── train.py # Deep Nash Q-learning agent 
-
-├── train_qmix.py # QMIX algorithm
-
-├── train_vdn.py # VDN algorithm
-
-├── model.py # SINR-based deterministic strategy
-
-├── abid_model.py # Custom baseline (Deterministic II)
-
-├── compare_models.py # Generate performance plots
-
-├── results/ # Raw data and plot images (.npy, .png)
-
-├── requirements.txt # Python dependencies
-
+```
+├── train.py                    # Deep Nash Q-learning agent
+├── train_iql.py               # Independent Q-Learning
+├── train_qmix.py              # QMIX algorithm
+├── train_vdn.py               # VDN algorithm
+├── train_maddpg.py            # MADDPG algorithm
+├── compare_all_marl.py        # Compare all MARL algorithms
+├── model.py                   # SINR-based deterministic strategy
+├── abid_model.py              # Custom baseline (Deterministic II)
+├── compare_models.py         # Generate performance plots
+├── compare_versions.py        # Compare old vs new (fixed vs variable height)
+├── test_ue_density.py         # UE density performance test
+├── test_performance.py        # Performance validation tests
+├── rl_agent/
+│   ├── marl_env.py            # MARL environment with variable height
+│   ├── IQL.py                 # Independent Q-Learning
+│   ├── VDN.py                 # Value Decomposition Networks
+│   ├── QMIX.py                # QMIX algorithm
+│   ├── DeepNashQ.py           # Deep Nash Q-learning
+│   └── MADDPG.py              # Multi-Agent DDPG
+├── results/                   # Raw data and plot images (.npy, .png)
+├── requirements.txt           # Python dependencies
 ├── LICENSE, Makefile, .gitignore
+```
 
 
 ---
@@ -47,10 +54,12 @@ Positioning UAVs for **Wi-Fi coverage** and user association is challenging due 
 - 🌀 User mobility
 - 📶 Inter-UAV interference
 - 📡 Real-time throughput and fairness constraints
+- 📏 **Height optimization** (LOS probability vs distance-based path loss trade-off)
 
 We aim to:
 - Maximize **system throughput**
 - Optimize **worst-case user experience**
+- **Learn optimal UAV heights** balancing LOS probability and path loss
 - Evaluate learning-based vs rule-based UAV coordination
 
 ---
@@ -59,11 +68,13 @@ We aim to:
 
 | Model              | Type              | Description |
 |-------------------|-------------------|-------------|
+| **IQL**            | Independent MARL  | Each agent learns independently (baseline) |
+| **VDN**            | Value-based MARL  | Linear decomposition of Q-values per agent |
+| **QMIX**           | Value-based MARL  | Nonlinear value mixing for complex agent interactions |
 | **Deep Nash Q**    | Game-Theoretic MARL | Learns Nash equilibrium strategies for cooperative behavior |
-| **QMIX**           | Value-based MARL   | Nonlinear value mixing for complex agent interactions |
-| **VDN**            | Value-based MARL   | Linear decomposition of Q-values per agent |
-| **Deterministic I**| SINR-based         | Greedy placement with static strategy |
-| **Deterministic II**| Geometry-based     | Circle-packing trajectory baseline |
+| **MADDPG**         | Actor-Critic MARL | Multi-agent deep deterministic policy gradient |
+| **Deterministic I**| SINR-based        | Greedy placement with static strategy |
+| **Deterministic II**| Geometry-based    | Circle-packing trajectory baseline |
 
 ---
 
@@ -93,9 +104,15 @@ pip install -r requirements.txt
 
 🏋️ Train RL Models
 
-python train.py        # Deep Nash Q
-python train_qmix.py   # QMIX
+python train_iql.py    # Independent Q-Learning
 python train_vdn.py    # VDN
+python train_qmix.py   # QMIX
+python train.py        # Deep Nash Q
+python train_maddpg.py # MADDPG
+
+📊 Compare All Algorithms
+
+python compare_all_marl.py  # Comprehensive comparison of all MARL methods
 
 🔬 Run Baseline Models
 
@@ -117,11 +134,62 @@ pip install -r requirements.txt
 🔬 Simulation Environment
 
 3D grid: 10×10×5 m³
-UAVs fly at fixed altitudes (10m, 15m)
+UAVs fly at variable altitudes (5-50m) with height-dependent LOS probability
 Wi-Fi standard: IEEE 802.11ac (CSMA/CA)
 Dynamic UE mobility (random waypoint)
 TDMA-based user scheduling
 Evaluation over 1000+ episodes with statistical significance
+
+---
+
+## 🆕 Variable Height Enhancement
+
+### Key Improvements
+
+This repository now includes **variable height optimization** with height-dependent LOS (Line-of-Sight) probability modeling:
+
+- **Height Range**: Expanded from fixed [10, 15]m to variable [5, 50]m
+- **LOS Probability Model**: Height-dependent function that:
+  - Increases with altitude (reduces obstacle blockage)
+  - Peaks at optimal height (~20m)
+  - Accounts for distance-based path loss at very high altitudes
+- **Path Loss Differentiation**: Separate models for LOS (exp=2.0) and NLOS (exp=3.5)
+- **Adaptive Shadowing**: Different variance for LOS (3.0 dB) vs NLOS (8.0 dB)
+
+### Performance Results
+
+**UE Density Test Results** (comparing old fixed-height vs new variable-height):
+
+| UE Count | Old Throughput | New Throughput | Improvement |
+|----------|----------------|----------------|-------------|
+| 5 UEs    | 3.447          | 4.737          | **+37.43%** |
+| 10 UEs   | 6.829          | 11.161         | **+63.43%** |
+| 15 UEs   | 9.734          | 11.929         | **+22.56%** |
+| 20 UEs   | 10.020         | 15.895         | **+58.63%** |
+| 25 UEs   | 14.574         | 23.673         | **+62.43%** |
+| 30 UEs   | 16.061         | 17.121         | **+6.60%** |
+| 40 UEs   | 20.361         | 34.878         | **+71.29%** |
+| 50 UEs   | 32.778         | 37.856         | **+15.49%** |
+
+**Summary Statistics:**
+- **Average Improvement**: **+42.23%** across all UE densities
+- **Per-User Throughput**: 0.850 (new) vs 0.601 (old) - **+41.4% improvement**
+- **Best Performance**: **+71.29%** improvement at 40 UEs
+- **Height Optimization**: UAVs learn optimal heights (~18-24m) based on conditions
+
+### Testing Variable Height
+
+```bash
+# Run UE density comparison test
+python test_ue_density.py
+
+# Run general version comparison
+python compare_versions.py
+```
+
+Generated plots:
+- `ue_density_comparison.png`: Comprehensive UE density analysis
+- `ue_density_detailed_analysis.png`: Detailed scaling analysis
 ```
 📚 References
 
