@@ -36,6 +36,15 @@ class MARLEnv(gym.Env):
         self.violation_penalty = -50.0   # Penalty for boundary violations
         # Initialize user positions
         self.user_positions = None
+        # UE velocity tracking (POINT 2: UE velocity considerations)
+        self.user_velocities = None  # Track user velocities
+        self.user_velocity_categories = None  # LOW, MEDIUM, HIGH mobility
+        # Packet drop parameters (POINT 2: UE velocity considerations)
+        self.packet_drop_rates = {
+            'LOW_MOBILITY': 0.01,    # 1% packet drop for low mobility users
+            'MEDIUM_MOBILITY': 0.05, # 5% packet drop for medium mobility users
+            'HIGH_MOBILITY': 0.15    # 15% packet drop for high mobility users
+        }
         # Channel parameters
         self.B = 1.0  # Bandwidth (arbitrary units)
         self.noise_power = 1e-3
@@ -65,6 +74,17 @@ class MARLEnv(gym.Env):
         self.init_user_positions[:, 0] *= self.grid_size[0]
         self.init_user_positions[:, 1] *= self.grid_size[1]
         self.init_user_positions[:, 2] = 0
+        
+        # Initialize user velocities and categories (POINT 2: UE velocity considerations)
+        self.init_user_velocities = np.random.uniform(0, 30, self.num_users)  # 0-30 m/s
+        self.init_user_velocity_categories = []
+        for vel in self.init_user_velocities:
+            if vel < 5:
+                self.init_user_velocity_categories.append('LOW_MOBILITY')
+            elif vel < 15:
+                self.init_user_velocity_categories.append('MEDIUM_MOBILITY')
+            else:
+                self.init_user_velocity_categories.append('HIGH_MOBILITY')
 
         #additions for handover,cij
         self.association = np.zeros(self.num_users, dtype=int)
@@ -86,6 +106,8 @@ class MARLEnv(gym.Env):
         # Target heights in range [10, 30] meters
         self.target_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
         self.user_positions = self.init_user_positions.copy()
+        self.user_velocities = self.init_user_velocities.copy()
+        self.user_velocity_categories = self.init_user_velocity_categories.copy()
         self.association = np.zeros(self.num_users, dtype=int)
         self.prev_association = np.zeros(self.num_users, dtype=int)
         self.handover_log = []
@@ -153,6 +175,30 @@ class MARLEnv(gym.Env):
             los_prob = self.los_prob_max * np.exp(-self.height_decay_factor * excess_height)
         
         return np.clip(los_prob, self.los_prob_base, self.los_prob_max)
+    
+    def _calculate_packet_drops(self, user_idx: int, uav_idx: int) -> float:
+        """
+        POINT 2: Calculate packet drop rate based on user velocity and UAV height.
+        Higher UAVs provide longer LOS duration for mobile users, reducing packet drops.
+        """
+        velocity_category = self.user_velocity_categories[user_idx]
+        base_drop_rate = self.packet_drop_rates[velocity_category]
+        
+        # Height factor: higher UAVs reduce packet drops for mobile users
+        # Using height range [5, 50] meters from observation space
+        uav_height = self.uav_positions[uav_idx, 2]
+        min_height, max_height = 5.0, 50.0
+        height_factor = 1.0 - min((uav_height - min_height) / (max_height - min_height), 1.0)
+        
+        # Mobile users benefit more from height
+        if velocity_category == 'HIGH_MOBILITY':
+            adjusted_drop_rate = base_drop_rate * (0.5 + 0.5 * height_factor)
+        elif velocity_category == 'MEDIUM_MOBILITY':
+            adjusted_drop_rate = base_drop_rate * (0.7 + 0.3 * height_factor)
+        else:
+            adjusted_drop_rate = base_drop_rate * (0.9 + 0.1 * height_factor)
+        
+        return adjusted_drop_rate
     
     def _compute_path_loss(self, distance: float, is_los: bool, uav_height: float) -> float:
         """
@@ -282,16 +328,39 @@ class MARLEnv(gym.Env):
             # Compute SINR and rate
             sinr = signal / (self.noise_power + interference)
             rate = self.B * np.log2(1 + sinr)
-            user_rates[user_idx] = rate
-            total_rate += rate
+            
+            # Apply packet drop based on velocity and height (POINT 2)
+            packet_drop_rate = self._calculate_packet_drops(user_idx, uav_idx)
+            effective_rate = rate * (1 - packet_drop_rate)
+            
+            user_rates[user_idx] = effective_rate
+            total_rate += effective_rate
 
         return total_rate, user_rates
     
     def _move_users(self):
-        """Move users minimally (simulate movement inside homes)."""
-        # Only move x and y, not z
-        movement = np.random.uniform(-0.2, 0.2, size=(self.num_users, 2))
-        self.user_positions[:, :2] += movement
+        """Move users with velocity considerations (POINT 2: UE velocity)."""
+        for i in range(self.num_users):
+            velocity = self.user_velocities[i]
+            # Movement distance based on velocity (assuming 1 time step = 1 second)
+            max_movement = velocity * 0.1  # Scale down for simulation
+            
+            movement = np.random.uniform(-max_movement, max_movement, size=2)
+            self.user_positions[i, :2] += movement
+            
+            # Update velocity occasionally
+            if np.random.random() < 0.1:  # 10% chance to change velocity
+                self.user_velocities[i] = max(0, self.user_velocities[i] + np.random.normal(0, 2))
+                
+                # Update velocity category
+                vel = self.user_velocities[i]
+                if vel < 5:
+                    self.user_velocity_categories[i] = 'LOW_MOBILITY'
+                elif vel < 15:
+                    self.user_velocity_categories[i] = 'MEDIUM_MOBILITY'
+                else:
+                    self.user_velocity_categories[i] = 'HIGH_MOBILITY'
+        
         # Clip to grid bounds
         self.user_positions[:, 0] = np.clip(self.user_positions[:, 0], 0, self.grid_size[0])
         self.user_positions[:, 1] = np.clip(self.user_positions[:, 1], 0, self.grid_size[1])
@@ -316,7 +385,17 @@ class MARLEnv(gym.Env):
         # Clip heights to valid range [5, 50] meters
         self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
         
-        # Move users minimally before reward/throughput calculation
+        # POINT 2: Prefer higher altitudes for high mobility users
+        for uav_idx in range(self.num_uavs):
+            served_user_indices = [i for i in range(self.num_users) if self.association[i] == uav_idx]
+            if served_user_indices:
+                high_mobility_users = sum(1 for i in served_user_indices 
+                                        if self.user_velocity_categories[i] == 'HIGH_MOBILITY')
+                if high_mobility_users > len(served_user_indices) * 0.3:  # >30% high mobility
+                    # Increase height slightly for high mobility users
+                    self.uav_positions[uav_idx, 2] = min(self.uav_positions[uav_idx, 2] + 2.0, 50)
+        
+        # Move users with velocity before reward/throughput calculation
         self._move_users()
         # Calculate throughput and per-user rates
         throughput, user_rates = self._compute_throughput()
