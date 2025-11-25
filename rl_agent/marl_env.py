@@ -36,6 +36,8 @@ class MARLEnv(gym.Env):
         self.violation_penalty = -50.0   # Penalty for boundary violations
         # Initialize user positions
         self.user_positions = None
+        self.uav_loads = None
+        self.movement_load_penalty = 0.5  # Weight for load-aware movement penalty
         # UE velocity tracking (POINT 2: UE velocity considerations)
         self.user_velocities = None  # Track user velocities
         self.user_velocity_categories = None  # LOW, MEDIUM, HIGH mobility
@@ -108,6 +110,7 @@ class MARLEnv(gym.Env):
         self.user_positions = self.init_user_positions.copy()
         self.user_velocities = self.init_user_velocities.copy()
         self.user_velocity_categories = self.init_user_velocity_categories.copy()
+        self.uav_loads = np.zeros(self.num_uavs)
         self.association = np.zeros(self.num_users, dtype=int)
         self.prev_association = np.zeros(self.num_users, dtype=int)
         self.handover_log = []
@@ -226,7 +229,7 @@ class MARLEnv(gym.Env):
         
         return base_path_loss * height_loss_factor
     
-    def _calculate_reward(self, user_rates=None) -> float:
+    def _calculate_reward(self, user_rates=None, movement_cost: float = 0.0) -> float:
         reward = 0.0
         if self._check_collisions():
             reward += self.collision_penalty
@@ -243,6 +246,7 @@ class MARLEnv(gym.Env):
         #  Handover penalty
         handover_count = np.sum(self.association != self.prev_association)
         reward -= handover_count * self.handover_penalty
+        reward -= self.movement_load_penalty * movement_cost
         return reward
     
     def _compute_throughput(self) -> (float, np.ndarray):
@@ -269,6 +273,8 @@ class MARLEnv(gym.Env):
         self.handover_log.append(handovers)
         if len(self.handover_log) > self.window_size:
             self.handover_log.pop(0)
+
+        self._update_uav_loads()
 
         # Compute SINR-based rate with height-dependent LOS and path loss
         for user_idx in range(self.num_users):
@@ -337,6 +343,15 @@ class MARLEnv(gym.Env):
             total_rate += effective_rate
 
         return total_rate, user_rates
+
+    def _update_uav_loads(self):
+        """Normalize number of served users per UAV into [0,1] load factors."""
+        counts = np.zeros(self.num_uavs, dtype=float)
+        for user_idx in range(self.num_users):
+            counts[self.association[user_idx]] += 1.0
+        if counts.max() > 0:
+            counts = counts / counts.max()
+        self.uav_loads = counts
     
     def _move_users(self):
         """Move users with velocity considerations (POINT 2: UE velocity)."""
@@ -378,9 +393,13 @@ class MARLEnv(gym.Env):
             5: np.array([-1, 0, 0])     # backward
         }
         
-        # Update UAV positions
+        movement_cost = 0.0
         for i, action in enumerate(actions):
-            self.uav_positions[i] += movements[action]
+            move_vec = movements[action]
+            self.uav_positions[i] += move_vec
+            if action < 6:
+                load_factor = 1.0 + (self.uav_loads[i] if self.uav_loads is not None else 0.0)
+                movement_cost += np.linalg.norm(move_vec) * load_factor
         
         # Clip heights to valid range [5, 50] meters
         self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
@@ -400,7 +419,7 @@ class MARLEnv(gym.Env):
         # Calculate throughput and per-user rates
         throughput, user_rates = self._compute_throughput()
         # Calculate reward with QoS info
-        reward = self._calculate_reward(user_rates)
+        reward = self._calculate_reward(user_rates, movement_cost)
         # Check violations
         qos_violation = self._check_qos_violations(user_rates)
         # Additional info
@@ -411,7 +430,8 @@ class MARLEnv(gym.Env):
             'qos_violation': qos_violation,
             'throughput': throughput,
             'user_rates': user_rates,
-            'handover_count': int(np.sum(self.association != self.prev_association))
+            'handover_count': int(np.sum(self.association != self.prev_association)),
+            'movement_cost': movement_cost
         }
         done = self._check_collisions() or self._check_boundary_violations() or self._check_altitude_violations() or qos_violation
         return self._get_observation(), reward, done, False, info 
