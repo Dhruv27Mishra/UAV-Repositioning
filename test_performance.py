@@ -14,24 +14,27 @@ def test_height_dependent_los():
     print("=" * 60)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = MARLEnv(num_uavs=3, num_users=10, grid_size=(10, 10, 5), device=device)
+    env = MARLEnv(num_uavs=1, num_users=1, grid_size=(10, 10, 5), device=device)
     
-    # Test LOS probability at different heights
-    heights = np.linspace(5, 50, 20)
+    # Test over a range of heights
+    heights = np.linspace(5, 50, 100)
     los_probs = []
     
+    print("Height (m) | LOS Probability")
+    print("-" * 30)
     for h in heights:
-        prob = env._compute_los_probability(h)
-        los_probs.append(prob)
-        print(f"Height: {h:5.1f}m -> LOS Probability: {prob:.3f}")
+        los_prob = env.height_dependent_los_probability(h)
+        los_probs.append(los_prob)
+        if h % 5 == 0:
+            print(f"{h:10.1f} | {los_prob:0.3f}")
     
     # Plot LOS probability vs height
-    plt.figure(figsize=(10, 6))
-    plt.plot(heights, los_probs, 'b-', linewidth=2, marker='o')
+    plt.figure(figsize=(8, 5))
+    plt.plot(heights, los_probs, 'b-', linewidth=2)
     plt.axvline(x=env.optimal_height, color='r', linestyle='--', label=f'Optimal Height ({env.optimal_height}m)')
     plt.xlabel('UAV Height (meters)', fontsize=12)
     plt.ylabel('LOS Probability', fontsize=12)
-    plt.title('Height-Dependent LOS Probability Model', fontsize=14)
+    plt.title('Height-Dependent LOS Probability', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
@@ -64,17 +67,19 @@ def test_throughput_vs_height():
         # Set all UAVs to same height
         env.uav_positions[:, 2] = h
         
-        # Average over multiple samples to account for stochasticity
-        sample_throughputs = []
-        sample_rates = []
-        for _ in range(10):
-            throughput, user_rates = env._compute_throughput()
-            sample_throughputs.append(throughput)
-            sample_rates.append(np.mean(user_rates))
+        # Average over multiple samples to account for stochastic effects
+        samples = 10
+        height_throughputs = []
+        height_user_rates = []
         
-        throughputs.append(np.mean(sample_throughputs))
-        avg_user_rates.append(np.mean(sample_rates))
-        print(f"  Height: {h:5.1f}m -> Avg Throughput: {np.mean(sample_throughputs):.3f}, Avg User Rate: {np.mean(sample_rates):.3f}")
+        for _ in range(samples):
+            actions = [0] * env.num_uavs  # Hover action (no movement)
+            _, _, _, _, info = env.step(actions)
+            height_throughputs.append(info['throughput'])
+            height_user_rates.append(np.mean(info['user_rates']))
+        
+        throughputs.append(np.mean(height_throughputs))
+        avg_user_rates.append(np.mean(height_user_rates))
     
     # Plot results
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
@@ -97,61 +102,128 @@ def test_throughput_vs_height():
     
     plt.tight_layout()
     plt.savefig('test_throughput_vs_height.png', dpi=150)
-    
-    optimal_idx = np.argmax(throughputs)
-    optimal_height = test_heights[optimal_idx]
-    print(f"\n✓ Throughput plot saved to 'test_throughput_vs_height.png'")
-    print(f"  Optimal height for throughput: {optimal_height:.1f}m")
-    print(f"  Max throughput: {max(throughputs):.3f}")
+    print("\n✓ Throughput vs height plot saved to 'test_throughput_vs_height.png'")
     
     return test_heights, throughputs, avg_user_rates
 
-def test_short_training():
-    """Run a short training episode to verify the system works."""
+def test_throughput_vs_velocity():
+    """
+    Test how throughput varies with UE (user equipment) velocity.
+    We sweep UE velocities and measure average throughput.
+    """
     print("\n" + "=" * 60)
-    print("Running Short Training Test (5 episodes)")
+    print("Testing Throughput vs UE Velocity")
+    print("=" * 60)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = MARLEnv(num_uavs=3, num_users=20, grid_size=(10, 10, 5), device=device)
+
+    # Velocities in m/s: from static to high mobility
+    test_velocities = np.array([0, 2, 5, 10, 15, 20, 25, 30])
+    throughputs = []
+    avg_user_rates = []
+
+    num_episodes = 20  # average over multiple episodes
+    print(f"Testing throughput at different UE velocities (averaging over {num_episodes} episodes per point)...")
+
+    for v in tqdm(test_velocities, desc="Velocity tests"):
+        vel_throughputs = []
+        vel_user_rates = []
+
+        for _ in range(num_episodes):
+            obs, _ = env.reset()
+
+            # Set ALL users to the same velocity v and correct categories
+            env.user_velocities[:] = v
+            if v < 5:
+                env.user_velocity_categories = ['LOW_MOBILITY'] * env.num_users
+            elif v < 15:
+                env.user_velocity_categories = ['MEDIUM_MOBILITY'] * env.num_users
+            else:
+                env.user_velocity_categories = ['HIGH_MOBILITY'] * env.num_users
+
+            # One step is enough to get throughput from current positions
+            actions = [0] * env.num_uavs  # e.g., "hover" or any fixed action
+            _, _, _, _, info = env.step(actions)
+
+            vel_throughputs.append(info.get('throughput', 0.0))
+            if 'user_rates' in info and len(info['user_rates']) > 0:
+                vel_user_rates.append(float(np.mean(info['user_rates'])))
+
+        throughputs.append(float(np.mean(vel_throughputs)))
+        avg_user_rates.append(float(np.mean(vel_user_rates)) if vel_user_rates else 0.0)
+
+    # Plot
+    plt.figure(figsize=(7, 5))
+    plt.plot(test_velocities, throughputs, marker='o', linewidth=2)
+    plt.xlabel("UE Velocity (m/s)")
+    plt.ylabel("Average Throughput")
+    plt.title("Throughput vs UE Velocity")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("test_throughput_vs_velocity.png", dpi=150)
+
+    print("\n✓ Throughput vs UE velocity plot saved to 'test_throughput_vs_velocity.png'")
+    print("Velocities:", test_velocities)
+    print("Throughputs:", throughputs)
+
+    return test_velocities, throughputs, avg_user_rates
+
+def test_short_training():
+    """Run a short training loop to verify stability."""
+    print("\n" + "=" * 60)
+    print("Testing Short Training Run")
     print("=" * 60)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = MARLEnv(num_uavs=3, num_users=10, grid_size=(10, 10, 5), device=device)
     
-    # Simple random policy test
-    obs, _ = env.reset()
-    episode_rewards = []
-    episode_throughputs = []
-    episode_heights = []
+    num_episodes = 50
+    rewards = []
+    throughputs = []
+    mean_heights = []
     
-    for episode in range(5):
+    for episode in tqdm(range(num_episodes), desc="Training"):
         obs, _ = env.reset()
         done = False
         episode_reward = 0
         episode_throughput = 0
-        step_count = 0
+        episode_heights = []
         
-        while not done and step_count < 50:  # Limit steps per episode
-            # Random actions
+        while not done:
             actions = [np.random.randint(0, 6) for _ in range(env.num_uavs)]
-            obs, reward, terminated, truncated, info = env.step(actions)
-            done = terminated or truncated
-            
+            obs, reward, done, _, info = env.step(actions)
             episode_reward += reward
             episode_throughput += info.get('throughput', 0)
-            step_count += 1
+            episode_heights.append(env.uav_positions[:, 2].copy())
         
-        avg_height = np.mean(env.uav_positions[:, 2])
-        episode_rewards.append(episode_reward)
-        episode_throughputs.append(episode_throughput)
-        episode_heights.append(avg_height)
-        
-        print(f"Episode {episode+1}: Reward={episode_reward:.2f}, Throughput={episode_throughput:.2f}, Avg Height={avg_height:.2f}m")
+        rewards.append(episode_reward)
+        throughputs.append(episode_throughput)
+        mean_heights.append(np.mean(episode_heights))
     
-    print(f"\n✓ Training test completed")
-    print(f"  Average reward: {np.mean(episode_rewards):.2f}")
-    print(f"  Average throughput: {np.mean(episode_throughputs):.2f}")
-    print(f"  Average height: {np.mean(episode_heights):.2f}m")
-    print(f"  Height range: [{np.min(episode_heights):.2f}, {np.max(episode_heights):.2f}]m")
+    # Plot training curves
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 4))
     
-    return episode_rewards, episode_throughputs, episode_heights
+    ax1.plot(rewards, 'b-')
+    ax1.set_title("Episode Reward")
+    ax1.set_xlabel("Episode")
+    ax1.set_ylabel("Reward")
+    
+    ax2.plot(throughputs, 'g-')
+    ax2.set_title("Episode Throughput")
+    ax2.set_xlabel("Episode")
+    ax2.set_ylabel("Throughput")
+    
+    ax3.plot(mean_heights, 'r-')
+    ax3.set_title("Mean UAV Height")
+    ax3.set_xlabel("Episode")
+    ax3.set_ylabel("Height (m)")
+    
+    plt.tight_layout()
+    plt.savefig('test_short_training.png', dpi=150)
+    print("\n✓ Short training plots saved to 'test_short_training.png'")
+    
+    return rewards, throughputs, mean_heights
 
 def main():
     """Run all performance tests."""
@@ -166,7 +238,10 @@ def main():
         # Test 2: Throughput vs height
         test_heights, throughputs, user_rates = test_throughput_vs_height()
         
-        # Test 3: Short training run
+        # Test 3: Throughput vs UE velocity
+        velocities, vel_throughputs, vel_user_rates = test_throughput_vs_velocity()
+        
+        # Test 4: Short training run
         rewards, throughputs_train, heights_train = test_short_training()
         
         print("\n" + "=" * 60)
@@ -175,6 +250,7 @@ def main():
         print("\nKey Findings:")
         print(f"  - LOS probability increases with height up to ~{heights[np.argmax(los_probs)]:.1f}m")
         print(f"  - Optimal height for throughput: ~{test_heights[np.argmax(throughputs)]:.1f}m")
+        print(f"  - Generated throughput vs UE velocity curve for velocities {velocities[0]} to {velocities[-1]} m/s")
         print(f"  - System successfully handles variable heights in range [5, 50]m")
         print(f"  - Height-dependent path loss and shadowing are working correctly")
         
@@ -189,5 +265,3 @@ def main():
 if __name__ == "__main__":
     success = main()
     exit(0 if success else 1)
-
-

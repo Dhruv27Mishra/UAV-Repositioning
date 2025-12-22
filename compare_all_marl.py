@@ -2,6 +2,7 @@
 Comprehensive comparison script for all MARL algorithms.
 Compares: IQL, VDN, QMIX, Deep Nash Q, MADDPG
 """
+
 import numpy as np
 import matplotlib.pyplot as plt
 from rl_agent.marl_env import MARLEnv
@@ -17,149 +18,258 @@ import time
 
 def jains_fairness(user_rates):
     """Calculate Jain's fairness index."""
-    user_rates = np.array(user_rates)
+    user_rates = np.array(user_rates, dtype=float)
+    if len(user_rates) == 0:
+        return 0.0
     numerator = np.sum(user_rates) ** 2
     denominator = len(user_rates) * np.sum(user_rates ** 2)
-    return numerator / denominator if denominator != 0 else 0
+    if denominator == 0:
+        return 0.0
+    return float(numerator / denominator)
 
 
-def run_algorithm(algorithm_name, agent_class, env, num_episodes=100, num_uavs=3,
-                  state_dim=3, action_dim=6, device=None, **kwargs):
+def run_algorithm(algorithm_name,
+                  agent_class,
+                  env,
+                  num_episodes=100,
+                  num_uavs=3,
+                  state_dim=3,
+                  action_dim=6,
+                  device=None,
+                  **kwargs):
     """Run a MARL algorithm and collect metrics."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Training {algorithm_name}")
-    print(f"{'='*70}")
-    
-    # Initialize agent
+    print(f"{'=' * 70}")
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ----- Initialize agent with correct constructor for each algorithm -----
     if algorithm_name == "QMIX":
+        # QMIX needs global_state_dim
         global_state_dim = state_dim * num_uavs
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim,
-                          action_dim=action_dim, global_state_dim=global_state_dim,
-                          device=device, **kwargs)
-    elif algorithm_name == "MADDPG":
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim,
-                          action_dim=action_dim, device=device, **kwargs)
+        agent = agent_class(
+            num_agents=num_uavs,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            global_state_dim=global_state_dim,
+            device=device,
+            **kwargs
+        )
     else:
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim,
-                          action_dim=action_dim, device=device, **kwargs)
-    
+        # IQL, VDN, Deep Nash Q, MADDPG
+        agent = agent_class(
+            num_agents=num_uavs,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            device=device,
+            **kwargs
+        )
+
     metrics = {
-        'throughputs': [],
-        'rewards': [],
-        'fairnesses': [],
-        'collisions': [],
-        'heights': []
+        "throughputs": [],
+        "rewards": [],
+        "fairnesses": [],
+        "collisions": [],
+        "heights": [],
+        "final_heights": None,  # we fill this after all episodes
     }
-    
+
     for episode in tqdm(range(num_episodes), desc=f"  {algorithm_name}"):
         obs, _ = env.reset()
         done = False
-        episode_reward = 0
-        episode_throughput = 0
+        episode_reward = 0.0
+        episode_throughput = 0.0
         episode_heights = []
         step_count = 0
+
         obs_tensor = torch.tensor(obs, device=device, dtype=torch.float32)
-        
+
         while not done and step_count < 50:
-            # Get actions
+            # -------- Get actions for each agent ----------
             actions = []
-            for i in range(num_uavs):
-                agent_obs = obs_tensor[i*3:(i+1)*3]
+            for i_agent in range(num_uavs):
+                # obs is flattened [x1,y1,z1, x2,y2,z2, ...]
+                agent_obs = obs_tensor[i_agent * state_dim:(i_agent + 1) * state_dim]
+
                 if algorithm_name == "MADDPG":
+                    # MADDPG supports exploration flag
                     explore = episode < num_episodes * 0.8
-                    action = agent.get_action(agent_obs, i, explore=explore)
+                    action = agent.get_action(agent_obs, i_agent, explore=explore)
                 else:
-                    action = agent.get_action(agent_obs, i)
-                actions.append(action)
-            
-            # Step environment
+                    action = agent.get_action(agent_obs, i_agent)
+
+                actions.append(int(action))
+
+            # -------- Step environment ----------
             next_obs, reward, terminated, truncated, info = env.step(actions)
             done = terminated or truncated
-            next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32)
-            
-            # Store transition
-            states = [obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
-            next_states = [next_obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
-            
+
+            next_obs_tensor = torch.tensor(
+                next_obs, device=device, dtype=torch.float32
+            )
+
+            # -------- Build per-agent states ----------
+            states = [
+                obs_tensor[i * state_dim:(i + 1) * state_dim]
+                for i in range(num_uavs)
+            ]
+            next_states = [
+                next_obs_tensor[i * state_dim:(i + 1) * state_dim]
+                for i in range(num_uavs)
+            ]
+
+            # -------- Store transition ----------
             if algorithm_name == "QMIX":
-                global_state = obs_tensor.flatten()
-                next_global_state = next_obs_tensor.flatten()
-                agent.store_transition(states, actions, [reward] * num_uavs,
-                                      next_states, [done] * num_uavs,
-                                      global_state, next_global_state)
+                # QMIX also needs global state and next global state
+                global_state = obs_tensor.clone()
+                next_global_state = next_obs_tensor.clone()
+                agent.store_transition(
+                    states,
+                    actions,
+                    [reward] * num_uavs,
+                    next_states,
+                    [done] * num_uavs,
+                    global_state,
+                    next_global_state,
+                )
             else:
-                agent.store_transition(states, actions, [reward] * num_uavs,
-                                      next_states, [done] * num_uavs)
-            
-            # Update agent
+                agent.store_transition(
+                    states,
+                    actions,
+                    [reward] * num_uavs,
+                    next_states,
+                    [done] * num_uavs,
+                )
+
+            # -------- Update agent ----------
             agent.update()
-            
-            obs = next_obs
+
+            # -------- Accumulate metrics ----------
             obs_tensor = next_obs_tensor
-            episode_reward += reward
-            episode_throughput += info.get('throughput', 0)
+            obs = next_obs
+            episode_reward += float(reward)
+            episode_throughput += float(info.get("throughput", 0.0))
             episode_heights.append(env.uav_positions[:, 2].copy())
-            
             step_count += 1
-        
-        # Calculate fairness
-        if 'user_rates' in info:
-            fairness = jains_fairness(info['user_rates'])
+
+        # -------- Fairness on last step of episode ----------
+        if "user_rates" in info and len(info["user_rates"]) > 0:
+            fairness = jains_fairness(info["user_rates"])
         else:
-            fairness = 0
-        
-        metrics['throughputs'].append(episode_throughput)
-        metrics['rewards'].append(episode_reward)
-        metrics['fairnesses'].append(fairness)
-        metrics['collisions'].append(info.get('collisions', False))
-        metrics['heights'].append(np.mean(episode_heights) if episode_heights else 0)
-    
+            fairness = 0.0
+
+        metrics["throughputs"].append(episode_throughput)
+        metrics["rewards"].append(episode_reward)
+        metrics["fairnesses"].append(fairness)
+        metrics["collisions"].append(bool(info.get("collisions", False)))
+        metrics["heights"].append(
+            float(np.mean(episode_heights)) if episode_heights else 0.0
+        )
+
+    # After all episodes, record FINAL UAV HEIGHTS
+    metrics["final_heights"] = env.uav_positions[:, 2].copy()
+
     return metrics
 
 
 def compare_all_algorithms(num_episodes=200, num_uavs=3, num_users=10):
-    """Compare all MARL algorithms."""
-    print("=" * 70)
-    print("COMPREHENSIVE MARL ALGORITHM COMPARISON")
-    print("=" * 70)
-    
+    """Compare all MARL algorithms on the same environment."""
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = MARLEnv(num_uavs=num_uavs, num_users=num_users, grid_size=(10, 10, 5),
-                 device=device)
+
+    # Base env just to get action_dim
+    env_tmp = MARLEnv(
+        num_uavs=num_uavs,
+        num_users=num_users,
+        grid_size=(10, 10, 5),
+        device=device,
+    )
     state_dim = 3
-    action_dim = env.action_space.nvec[0]
-    
-    # Algorithm configurations
+    action_dim = int(env_tmp.action_space.nvec[0])
+
+    # Algorithm configurations (matches your rl_agent constructors)
     algorithms = {
-        'IQL': (IQL, {'learning_rate': 0.001, 'gamma': 0.99, 'epsilon': 0.1,
-                     'buffer_size': 10000, 'batch_size': 64, 'target_update': 100}),
-        'VDN': (VDN, {'learning_rate': 0.001, 'gamma': 0.99, 'epsilon': 0.1,
-                     'buffer_size': 10000, 'batch_size': 64, 'target_update': 100}),
-        'QMIX': (QMIX, {'learning_rate': 0.001, 'gamma': 0.99, 'epsilon': 0.1,
-                       'buffer_size': 10000, 'batch_size': 64, 'target_update': 100}),
-        'Deep Nash Q': (DeepNashQ, {'learning_rate': 0.001, 'gamma': 0.99,
-                                   'epsilon': 0.1, 'buffer_size': 10000,
-                                   'batch_size': 64, 'target_update': 100}),
-        'MADDPG': (MADDPG, {'learning_rate_actor': 0.001,
-                           'learning_rate_critic': 0.001, 'gamma': 0.99,
-                           'tau': 0.01, 'buffer_size': 10000, 'batch_size': 64})
+        "IQL": (
+            IQL,
+            {
+                "learning_rate": 0.001,
+                "gamma": 0.99,
+                "epsilon": 0.1,
+                "buffer_size": 10000,
+                "batch_size": 64,
+                "target_update": 100,
+            },
+        ),
+        "VDN": (
+            VDN,
+            {
+                "learning_rate": 0.001,
+                "gamma": 0.99,
+                "epsilon": 0.1,
+                "buffer_size": 10000,
+                "batch_size": 64,
+                "target_update": 100,
+            },
+        ),
+        "QMIX": (
+            QMIX,
+            {
+                "learning_rate": 0.001,
+                "gamma": 0.99,
+                "epsilon": 0.1,
+                "buffer_size": 10000,
+                "batch_size": 64,
+                "target_update": 100,
+            },
+        ),
+        "Deep Nash Q": (
+            DeepNashQ,
+            {
+                "learning_rate": 0.001,
+                "gamma": 0.99,
+                "epsilon": 0.1,
+                "buffer_size": 10000,
+                "batch_size": 64,
+                "target_update": 100,
+            },
+        ),
+        "MADDPG": (
+            MADDPG,
+            {
+                "learning_rate_actor": 0.001,
+                "learning_rate_critic": 0.001,
+                "gamma": 0.99,
+                "tau": 0.01,
+                "buffer_size": 10000,
+                "batch_size": 64,
+            },
+        ),
     }
-    
+
     results = {}
-    
-    # Run each algorithm
-    for alg_name, (alg_class, alg_kwargs) in algorithms.items():
-        metrics = run_algorithm(alg_name, alg_class, env, num_episodes=num_episodes,
-                              num_uavs=num_uavs, state_dim=state_dim,
-                              action_dim=action_dim, device=device, **alg_kwargs)
+
+    for alg_name, (agent_class, kwargs) in algorithms.items():
+        env = MARLEnv(
+            num_uavs=num_uavs,
+            num_users=num_users,
+            grid_size=(10, 10, 5),
+            device=device,
+        )
+        metrics = run_algorithm(
+            alg_name,
+            agent_class,
+            env,
+            num_episodes=num_episodes,
+            num_uavs=num_uavs,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            device=device,
+            **kwargs,
+        )
         results[alg_name] = metrics
-    
-    # Print summary
-    print_summary(results)
-    
-    # Create plots
-    plot_comparison(results)
-    
+
     return results
 
 
@@ -168,154 +278,131 @@ def print_summary(results):
     print("\n" + "=" * 70)
     print("COMPARISON SUMMARY")
     print("=" * 70)
-    
+
     print("\n📊 THROUGHPUT STATISTICS:")
     throughput_means = {}
     for alg_name, metrics in results.items():
-        mean_tp = np.mean(metrics['throughputs'])
-        std_tp = np.std(metrics['throughputs'])
+        mean_tp = float(np.mean(metrics["throughputs"]))
+        std_tp = float(np.std(metrics["throughputs"]))
         throughput_means[alg_name] = mean_tp
-        print(f"  {alg_name:15s}: {mean_tp:7.3f} ± {std_tp:6.3f}")
-    
+        print(f"  {alg_name:15s}: {mean_tp:10.3f} ± {std_tp:8.3f}")
+
     best_alg = max(throughput_means, key=throughput_means.get)
-    print(f"\n🏆 Best Performer: {best_alg} ({throughput_means[best_alg]:.3f})")
-    
-    print("\n📈 FAIRNESS STATISTICS:")
+    print(f"\n🏆 Best Performer (throughput): {best_alg} ({throughput_means[best_alg]:.3f})")
+
+    print("\n📈 FAIRNESS STATISTICS (Jain's index):")
     for alg_name, metrics in results.items():
-        mean_fair = np.mean(metrics['fairnesses'])
+        mean_fair = float(np.mean(metrics["fairnesses"]))
         print(f"  {alg_name:15s}: {mean_fair:.4f}")
-    
-    print("\n💥 COLLISIONS:")
+
+    print("\n💥 COLLISIONS (episodes with collision):")
     for alg_name, metrics in results.items():
-        total_collisions = np.sum(metrics['collisions'])
+        total_collisions = int(np.sum(metrics["collisions"]))
         print(f"  {alg_name:15s}: {total_collisions:4d}")
-    
-    print("\n📏 HEIGHT STATISTICS:")
+
+    print("\n📏 MEAN UAV HEIGHT PER EPISODE:")
     for alg_name, metrics in results.items():
-        mean_height = np.mean([h for h in metrics['heights'] if h > 0])
-        print(f"  {alg_name:15s}: {mean_height:6.2f}m")
+        valid_heights = [h for h in metrics["heights"] if h > 0]
+        mean_height = float(np.mean(valid_heights)) if valid_heights else 0.0
+        print(f"  {alg_name:15s}: {mean_height:6.2f} m")
+
+    print("\n🛬 FINAL UAV HEIGHTS AFTER LEARNING:")
+    for alg_name, metrics in results.items():
+        final_h = metrics.get("final_heights", None)
+        if final_h is not None:
+            print(f"  {alg_name:15s}: {np.array2string(final_h, precision=2)}")
+        else:
+            print(f"  {alg_name:15s}: (final heights not recorded)")
 
 
 def plot_comparison(results):
-    """Create comprehensive comparison plots."""
-    fig = plt.figure(figsize=(18, 12))
-    
+    """Create simple comparison plots (throughput, reward, fairness, height)."""
+    fig = plt.figure(figsize=(18, 10))
+
     algorithms = list(results.keys())
-    colors = ['red', 'blue', 'green', 'orange', 'purple']
-    
-    # Plot 1: Throughput over episodes
-    ax1 = plt.subplot(2, 3, 1)
-    for i, alg_name in enumerate(algorithms):
-        episodes = range(len(results[alg_name]['throughputs']))
-        ax1.plot(episodes, results[alg_name]['throughputs'],
-                color=colors[i % len(colors)], alpha=0.6, label=alg_name, linewidth=1.5)
-    ax1.set_xlabel('Episode', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Throughput', fontsize=12, fontweight='bold')
-    ax1.set_title('Throughput Over Episodes', fontsize=14, fontweight='bold')
-    ax1.legend(fontsize=10)
+    colors = ["red", "blue", "green", "orange", "purple"]
+
+    # Throughput over episodes
+    ax1 = fig.add_subplot(2, 2, 1)
+    for idx, (alg_name, metrics) in enumerate(results.items()):
+        ax1.plot(
+            metrics["throughputs"],
+            label=alg_name,
+            color=colors[idx % len(colors)],
+            alpha=0.8,
+        )
+    ax1.set_title("Episode Throughput")
+    ax1.set_xlabel("Episode")
+    ax1.set_ylabel("Throughput")
     ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Average throughput comparison
-    ax2 = plt.subplot(2, 3, 2)
-    means = [np.mean(results[alg]['throughputs']) for alg in algorithms]
-    stds = [np.std(results[alg]['throughputs']) for alg in algorithms]
-    bars = ax2.bar(algorithms, means, yerr=stds, capsize=5, color=colors[:len(algorithms)],
-                  alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax2.set_ylabel('Average Throughput', fontsize=12, fontweight='bold')
-    ax2.set_title('Average Throughput Comparison', fontsize=14, fontweight='bold')
-    ax2.grid(True, alpha=0.3, axis='y')
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    # Add value labels on bars
-    for i, (bar, mean) in enumerate(zip(bars, means)):
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2., height + stds[i],
-                f'{mean:.2f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
-    # Plot 3: Fairness comparison
-    ax3 = plt.subplot(2, 3, 3)
-    fairness_means = [np.mean(results[alg]['fairnesses']) for alg in algorithms]
-    bars = ax3.bar(algorithms, fairness_means, color=colors[:len(algorithms)],
-                  alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax3.set_ylabel("Jain's Fairness Index", fontsize=12, fontweight='bold')
-    ax3.set_title('Fairness Comparison', fontsize=14, fontweight='bold')
-    ax3.set_ylim([0, 1])
-    ax3.grid(True, alpha=0.3, axis='y')
-    plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    for bar, mean in zip(bars, fairness_means):
-        height = bar.get_height()
-        ax3.text(bar.get_x() + bar.get_width()/2., height,
-                f'{mean:.3f}', ha='center', va='bottom', fontsize=9, fontweight='bold')
-    
-    # Plot 4: Throughput distribution
-    ax4 = plt.subplot(2, 3, 4)
-    for i, alg_name in enumerate(algorithms):
-        ax4.hist(results[alg_name]['throughputs'], bins=30, alpha=0.5,
-                color=colors[i % len(colors)], label=alg_name, density=True)
-    ax4.set_xlabel('Throughput', fontsize=12, fontweight='bold')
-    ax4.set_ylabel('Density', fontsize=12, fontweight='bold')
-    ax4.set_title('Throughput Distribution', fontsize=14, fontweight='bold')
-    ax4.legend(fontsize=10)
+    ax1.legend()
+
+    # Reward over episodes
+    ax2 = fig.add_subplot(2, 2, 2)
+    for idx, (alg_name, metrics) in enumerate(results.items()):
+        ax2.plot(
+            metrics["rewards"],
+            label=alg_name,
+            color=colors[idx % len(colors)],
+            alpha=0.8,
+        )
+    ax2.set_title("Episode Reward")
+    ax2.set_xlabel("Episode")
+    ax2.set_ylabel("Reward")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+
+    # Fairness over episodes
+    ax3 = fig.add_subplot(2, 2, 3)
+    for idx, (alg_name, metrics) in enumerate(results.items()):
+        ax3.plot(
+            metrics["fairnesses"],
+            label=alg_name,
+            color=colors[idx % len(colors)],
+            alpha=0.8,
+        )
+    ax3.set_title("Jain's Fairness Index")
+    ax3.set_xlabel("Episode")
+    ax3.set_ylabel("Fairness")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+
+    # Heights over episodes
+    ax4 = fig.add_subplot(2, 2, 4)
+    for idx, (alg_name, metrics) in enumerate(results.items()):
+        ax4.plot(
+            metrics["heights"],
+            label=alg_name,
+            color=colors[idx % len(colors)],
+            alpha=0.8,
+        )
+    ax4.set_title("Mean UAV Height per Episode")
+    ax4.set_xlabel("Episode")
+    ax4.set_ylabel("Height (m)")
     ax4.grid(True, alpha=0.3)
-    
-    # Plot 5: Reward comparison
-    ax5 = plt.subplot(2, 3, 5)
-    reward_means = [np.mean(results[alg]['rewards']) for alg in algorithms]
-    reward_stds = [np.std(results[alg]['rewards']) for alg in algorithms]
-    bars = ax5.bar(algorithms, reward_means, yerr=reward_stds, capsize=5,
-                  color=colors[:len(algorithms)], alpha=0.7, edgecolor='black', linewidth=1.5)
-    ax5.set_ylabel('Average Reward', fontsize=12, fontweight='bold')
-    ax5.set_title('Reward Comparison', fontsize=14, fontweight='bold')
-    ax5.grid(True, alpha=0.3, axis='y')
-    plt.setp(ax5.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    # Plot 6: Summary table
-    ax6 = plt.subplot(2, 3, 6)
-    ax6.axis('off')
-    
-    table_data = []
-    for alg in algorithms:
-        metrics = results[alg]
-        mean_tp = np.mean(metrics['throughputs'])
-        mean_fair = np.mean(metrics['fairnesses'])
-        collisions = np.sum(metrics['collisions'])
-        table_data.append([
-            alg,
-            f'{mean_tp:.3f}',
-            f'{mean_fair:.3f}',
-            f'{collisions}'
-        ])
-    
-    table = ax6.table(cellText=table_data,
-                     colLabels=['Algorithm', 'Avg Throughput', 'Fairness', 'Collisions'],
-                     cellLoc='center',
-                     loc='center',
-                     bbox=[0, 0, 1, 1])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2.5)
-    
-    # Style header
-    for i in range(4):
-        table[(0, i)].set_facecolor('#4CAF50')
-        table[(0, i)].set_text_props(weight='bold', color='white')
-    
-    # Highlight best performer
-    best_idx = np.argmax(means)
-    for i in range(4):
-        table[(best_idx + 1, i)].set_facecolor('#FFEB3B')
-    
-    plt.suptitle('MARL Algorithm Comparison: All Methods', fontsize=16,
-                fontweight='bold', y=0.995)
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    plt.savefig('marl_comparison_all.png', dpi=150, bbox_inches='tight')
+    ax4.legend()
+
+    plt.tight_layout()
+    plt.savefig("marl_comparison_all.png", dpi=150)
     print("\n✓ Comparison plot saved to 'marl_comparison_all.png'")
 
 
-if __name__ == "__main__":
-    results = compare_all_algorithms(num_episodes=200, num_uavs=3, num_users=10)
-    print("\n" + "=" * 70)
-    print("Comparison complete!")
-    print("=" * 70)
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    start = time.time()
 
+    results = compare_all_algorithms(
+        num_episodes=200,
+        num_uavs=3,
+        num_users=10,  # match your original default; change to 20 if you want
+    )
+
+    print_summary(results)
+    plot_comparison(results)
+
+    end = time.time()
+    print(f"\nTotal comparison time: {end - start:.1f} s")
+
+
+if __name__ == "__main__":
+    main()

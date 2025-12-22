@@ -9,7 +9,14 @@ from typing import Tuple, Dict, List
 import matplotlib.pyplot as plt
 
 class MARLEnv(gym.Env):
-    def __init__(self, num_uavs: int = 3, num_users: int = 20, grid_size: Tuple[int, int, int] = (10, 10, 5), device: torch.device = None, min_user_rate: float = 0.5, qos_bonus: float = 10.0):
+    def __init__(self,
+                 num_uavs: int = 3,
+                 num_users: int = 20,
+                 grid_size: Tuple[int, int, int] = (10, 10, 5),
+                 device: torch.device = None,
+                 min_user_rate: float = 0.5,
+                 qos_bonus: float = 10.0,
+                 ue_height_range: Tuple[float, float] = (0.0, 5.0)):
         super(MARLEnv, self).__init__()
         self.num_uavs = num_uavs
         self.num_users = num_users
@@ -17,6 +24,8 @@ class MARLEnv(gym.Env):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.min_user_rate = min_user_rate
         self.qos_bonus = qos_bonus
+        # NEW: UE heights in [0, 5] m (configurable)
+        self.ue_height_range = ue_height_range
         
         # Define action space (6 possible movements: up, down, left, right, forward, backward)
         self.action_space = spaces.MultiDiscrete([6] * num_uavs)
@@ -39,441 +48,315 @@ class MARLEnv(gym.Env):
         self.uav_loads = None
         self.movement_load_penalty = 0.5  # Weight for load-aware movement penalty
         # UE velocity tracking (POINT 2: UE velocity considerations)
-        self.user_velocities = None  # Track user velocities
-        self.user_velocity_categories = None  # LOW, MEDIUM, HIGH mobility
-        # Packet drop parameters (POINT 2: UE velocity considerations)
-        self.packet_drop_rates = {
-            'LOW_MOBILITY': 0.01,    # 1% packet drop for low mobility users
-            'MEDIUM_MOBILITY': 0.05, # 5% packet drop for medium mobility users
-            'HIGH_MOBILITY': 0.15    # 15% packet drop for high mobility users
-        }
-        # Channel parameters
-        self.B = 1.0  # Bandwidth (arbitrary units)
-        self.noise_power = 1e-3
-        self.tx_power = 1.0
-        self.path_loss_exp_los = 2.0  # Path loss exponent for LOS (lower due to clear path)
-        self.path_loss_exp_nlos = 3.5  # Path loss exponent for NLOS (higher due to obstacles)
+        self.user_velocities = None
+        self.user_velocity_categories = None  # LOW_MOBILITY, MEDIUM_MOBILITY, HIGH_MOBILITY
         
-        # Height-dependent LOS probability parameters
-        # At lower altitude, LOS blocked by obstacles; at higher altitude, LOS increases
-        # After threshold, distance-based path loss dominates
-        self.los_prob_base = 0.1  # Base LOS probability at ground level
-        self.los_prob_max = 0.95  # Maximum LOS probability at optimal height
-        self.optimal_height = 20.0  # Approximate optimal height (meters) where LOS probability peaks
-        self.height_sensitivity = 0.15  # Controls how quickly LOS probability changes with height
-        self.height_decay_factor = 0.02  # Controls decay after optimal height
+        # Height-dependent LOS probability model (POINT 1: Height-dependent LOS probability)
+        self.optimal_height = 20.0  # Optimal height in meters for maximizing LOS probability
+        self.height_spread = 10.0   # Spread parameter for the Gaussian-like height dependency
         
-        # Shadowing/fading parameters
-        self.shadowing_std_los = 3.0  # Shadowing standard deviation for LOS (dB)
-        self.shadowing_std_nlos = 8.0  # Shadowing standard deviation for NLOS (dB)
-        # Fixed initial UAV and user positions (random, but fixed for the run)
+        # Path loss parameters (distance- and height-dependent)
+        self.path_loss_exponent_los = 2.0
+        self.path_loss_exponent_nlos = 3.5
+        self.shadowing_std_los = 2.0
+        self.shadowing_std_nlos = 8.0
+        
+        # Capacity calculation parameters
+        self.bandwidth = 10e6  # 10 MHz
+        self.noise_figure = 9  # in dB
+        self.noise_power_dbm = -174 + 10 * np.log10(self.bandwidth) + self.noise_figure
+        self.transmit_power_dbm = 30  # 1 Watt
+        
+        # Maximum steps per episode
+        self.max_steps = 50
+        self.current_step = 0
+        
+        # For plotting and debugging
+        self.enable_plotting = False
+        self.fig = None
+        self.ax = None
+
+    def height_dependent_los_probability(self, height: float) -> float:
+        """
+        Calculate LOS probability as a function of UAV height.
+        Uses a Gaussian-like function centered at an optimal height.
+        """
+        exponent = -((height - self.optimal_height) ** 2) / (2 * self.height_spread ** 2)
+        los_prob = np.exp(exponent)
+        return float(np.clip(los_prob, 0.0, 1.0))
+
+    def calculate_path_loss(self, distance: float, height: float) -> Tuple[float, bool]:
+        """
+        Calculate path loss (in dB) based on distance and height-dependent LOS probability.
+        Returns (path_loss_db, is_los).
+        """
+        los_prob = self.height_dependent_los_probability(height)
+        is_los = np.random.rand() < los_prob
+        
+        # Free-space path loss at reference distance 1m
+        frequency = 2.4e9  # 2.4 GHz
+        c = 3e8  # Speed of light
+        lambda_c = c / frequency
+        fspl_db_1m = 20 * np.log10(4 * np.pi / lambda_c)
+        
+        if is_los:
+            path_loss_exponent = self.path_loss_exponent_los
+            shadowing_std = self.shadowing_std_los
+        else:
+            path_loss_exponent = self.path_loss_exponent_nlos
+            shadowing_std = self.shadowing_std_nlos
+        
+        # Distance-dependent path loss
+        path_loss_db = fspl_db_1m + 10 * path_loss_exponent * np.log10(max(distance, 1.0))
+        
+        # Shadowing
+        shadowing_db = np.random.normal(0, shadowing_std)
+        path_loss_db += shadowing_db
+        
+        return float(path_loss_db), is_los
+
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment with updated initializations for UAV and users.
+        """
+        super().reset(seed=seed)
+        
+        # Initialize UAV positions with diversity in height
         self.init_uav_positions = np.random.rand(self.num_uavs, 3)
         self.init_uav_positions[:, 0] *= self.grid_size[0]
         self.init_uav_positions[:, 1] *= self.grid_size[1]
         # Initialize heights in range [10, 30] meters to start near optimal region
         self.init_uav_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
+        
+        # Initialize user positions with heights between ue_height_range[0] and ue_height_range[1]
         self.init_user_positions = np.random.rand(self.num_users, 3)
         self.init_user_positions[:, 0] *= self.grid_size[0]
         self.init_user_positions[:, 1] *= self.grid_size[1]
-        self.init_user_positions[:, 2] = 0
+        # NEW: UE heights from specified range (default 0–5 m)
+        self.init_user_positions[:, 2] = np.random.uniform(
+            self.ue_height_range[0],
+            self.ue_height_range[1],
+            self.num_users
+        )
         
         # Initialize user velocities and categories (POINT 2: UE velocity considerations)
         self.init_user_velocities = np.random.uniform(0, 30, self.num_users)  # 0-30 m/s
         self.init_user_velocity_categories = []
-        for vel in self.init_user_velocities:
-            if vel < 5:
+        for v in self.init_user_velocities:
+            if v < 5:
                 self.init_user_velocity_categories.append('LOW_MOBILITY')
-            elif vel < 15:
+            elif v < 15:
                 self.init_user_velocity_categories.append('MEDIUM_MOBILITY')
             else:
                 self.init_user_velocity_categories.append('HIGH_MOBILITY')
-
-        #additions for handover,cij
-        self.association = np.zeros(self.num_users, dtype=int)
-        self.prev_association = np.zeros(self.num_users, dtype=int)
-        self.handover_log = []
-        self.window_size = 5
-        self.handover_penalty = 2.0  
-
         
-    def reset(self, seed=None) -> Tuple[np.ndarray, Dict]:
-        """Reset the environment to initial state."""
-        super().reset(seed=seed)
-        # Set UAV and user positions to fixed initial positions
+        # Copy initial positions to current positions
         self.uav_positions = self.init_uav_positions.copy()
-        # Target positions can still be random per episode
-        self.target_positions = np.random.rand(self.num_uavs, 3)
-        self.target_positions[:, 0] *= self.grid_size[0]
-        self.target_positions[:, 1] *= self.grid_size[1]
-        # Target heights in range [10, 30] meters
-        self.target_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
         self.user_positions = self.init_user_positions.copy()
         self.user_velocities = self.init_user_velocities.copy()
         self.user_velocity_categories = self.init_user_velocity_categories.copy()
+        
+        # Initialize UAV loads
         self.uav_loads = np.zeros(self.num_uavs)
-        self.association = np.zeros(self.num_users, dtype=int)
-        self.prev_association = np.zeros(self.num_users, dtype=int)
-        self.handover_log = []
+        
+        # Reset step counter
+        self.current_step = 0
+        
+        # Initialize target positions (for potential trajectory planning)
+        self.target_positions = self.uav_positions.copy()
+        
+        # Optional plotting setup
+        if self.enable_plotting:
+            self._setup_plot()
+        
+        obs = self._get_obs()
+        return obs, {}
 
-        return self._get_observation(), {}
+    def _setup_plot(self):
+        """Setup 3D plot for visualization."""
+        self.fig = plt.figure(figsize=(8, 6))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.ax.set_xlim(0, self.grid_size[0])
+        self.ax.set_ylim(0, self.grid_size[1])
+        self.ax.set_zlim(0, 50)
+        self.ax.set_xlabel('X (m)')
+        self.ax.set_ylabel('Y (m)')
+        self.ax.set_zlabel('Height (m)')
+        self.ax.set_title('UAV and User Positions')
     
-    def _get_observation(self) -> np.ndarray:
-        """Get current observation."""
-        return self.uav_positions.flatten()
-    
-    def _check_collisions(self) -> bool:
-        """Check for collisions between UAVs."""
-        for i in range(self.num_uavs):
-            for j in range(i + 1, self.num_uavs):
-                distance = np.linalg.norm(self.uav_positions[i] - self.uav_positions[j])
-                if distance < 1.0:  # Collision threshold
-                    return True
-        return False
-    
-    def _check_boundary_violations(self) -> bool:
-        """Check if any UAV is outside the grid boundaries (horizontal position constraint)."""
-        x = self.uav_positions[:, 0]
-        y = self.uav_positions[:, 1]
-        return np.any(x < 0) or np.any(x >= self.grid_size[0]) or np.any(y < 0) or np.any(y >= self.grid_size[1])
-    
-    def _check_altitude_violations(self) -> bool:
-        """Check if any UAV is outside the allowed altitude range [5, 50] meters.
-        Expanded range to allow learning optimal height."""
-        z = self.uav_positions[:, 2]
-        return np.any(z < 5) or np.any(z > 50)
-    
-    def _check_qos_violations(self, user_rates: np.ndarray) -> bool:
-        """Check if any user rate is below the minimum required rate (QoS)."""
-        return np.any(user_rates < self.min_user_rate)
-    
-    def _compute_los_probability(self, uav_height: float) -> float:
+    def _update_plot(self):
+        """Update 3D plot with current positions."""
+        if self.fig is None or self.ax is None:
+            self._setup_plot()
+        
+        self.ax.cla()
+        self.ax.set_xlim(0, self.grid_size[0])
+        self.ax.set_ylim(0, self.grid_size[1])
+        self.ax.set_zlim(0, 50)
+        self.ax.set_xlabel('X (m)')
+        self.ax.set_ylabel('Y (m)')
+        self.ax.set_zlabel('Height (m)')
+        self.ax.set_title('UAV and User Positions')
+        
+        # Plot UAVs
+        self.ax.scatter(self.uav_positions[:, 0],
+                        self.uav_positions[:, 1],
+                        self.uav_positions[:, 2],
+                        c='r', marker='^', s=80, label='UAVs')
+        
+        # Plot Users
+        self.ax.scatter(self.user_positions[:, 0],
+                        self.user_positions[:, 1],
+                        self.user_positions[:, 2],
+                        c='b', marker='o', s=40, alpha=0.5, label='Users')
+        
+        self.ax.legend()
+        plt.draw()
+        plt.pause(0.01)
+
+    def _get_obs(self) -> np.ndarray:
+        """Get the observation (UAV positions)."""
+        return self.uav_positions.flatten().astype(np.float32)
+
+    def step(self, actions: List[int]):
         """
-        Compute LOS probability based on UAV height.
-        
-        At lower altitude, LOS can be blocked by obstacles (buildings, trees).
-        At higher altitude, LOS probability increases.
-        After optimal height, distance-based path loss dominates.
-        
-        Args:
-            uav_height: Height of the UAV in meters
-            
-        Returns:
-            LOS probability in [0, 1]
+        Take a step in the environment.
+        Actions: list of actions for each UAV (0: up, 1: down, 2: left, 3: right, 4: forward, 5: backward)
         """
-        if uav_height < 5:
-            # Very low altitude, high blockage probability
-            return self.los_prob_base
+        self.current_step += 1
         
-        # LOS probability increases with height up to optimal height
-        if uav_height <= self.optimal_height:
-            # Increasing phase: LOS probability grows with height
-            height_factor = (uav_height - 5) / (self.optimal_height - 5)
-            los_prob = self.los_prob_base + (self.los_prob_max - self.los_prob_base) * (
-                1 - np.exp(-self.height_sensitivity * height_factor * (self.optimal_height - 5))
-            )
-        else:
-            # Decreasing phase: After optimal height, distance-based path loss dominates
-            # LOS probability still high but slightly decreases due to increased distance
-            excess_height = uav_height - self.optimal_height
-            los_prob = self.los_prob_max * np.exp(-self.height_decay_factor * excess_height)
-        
-        return np.clip(los_prob, self.los_prob_base, self.los_prob_max)
-    
-    def _calculate_packet_drops(self, user_idx: int, uav_idx: int) -> float:
-        """
-        POINT 2: Calculate packet drop rate based on user velocity and UAV height.
-        Higher UAVs provide longer LOS duration for mobile users, reducing packet drops.
-        """
-        velocity_category = self.user_velocity_categories[user_idx]
-        base_drop_rate = self.packet_drop_rates[velocity_category]
-        
-        # Height factor: higher UAVs reduce packet drops for mobile users
-        # Using height range [5, 50] meters from observation space
-        uav_height = self.uav_positions[uav_idx, 2]
-        min_height, max_height = 5.0, 50.0
-        height_factor = 1.0 - min((uav_height - min_height) / (max_height - min_height), 1.0)
-        
-        # Mobile users benefit more from height
-        if velocity_category == 'HIGH_MOBILITY':
-            adjusted_drop_rate = base_drop_rate * (0.5 + 0.5 * height_factor)
-        elif velocity_category == 'MEDIUM_MOBILITY':
-            adjusted_drop_rate = base_drop_rate * (0.7 + 0.3 * height_factor)
-        else:
-            adjusted_drop_rate = base_drop_rate * (0.9 + 0.1 * height_factor)
-        
-        return adjusted_drop_rate
-    
-    def _compute_path_loss(self, distance: float, is_los: bool, uav_height: float) -> float:
-        """
-        Compute path loss based on LOS/NLOS state and distance.
-        
-        Args:
-            distance: 3D distance between UAV and user
-            is_los: Boolean indicating LOS or NLOS state
-            uav_height: Height of UAV (for additional height-dependent loss)
-            
-        Returns:
-            Path loss factor (to be divided from signal power)
-        """
-        if is_los:
-            path_loss_exp = self.path_loss_exp_los
-        else:
-            path_loss_exp = self.path_loss_exp_nlos
-        
-        # Base path loss: distance^path_loss_exp
-        base_path_loss = distance ** path_loss_exp
-        
-        # Additional height-dependent loss factor (small effect)
-        # At very high altitudes, additional loss due to increased distance
-        height_loss_factor = 1.0 + 0.01 * max(0, uav_height - self.optimal_height)
-        
-        return base_path_loss * height_loss_factor
-    
-    def _calculate_reward(self, user_rates=None, movement_cost: float = 0.0) -> float:
-        reward = 0.0
-        if self._check_collisions():
-            reward += self.collision_penalty
-        if self._check_boundary_violations():
-            reward += self.violation_penalty
-        if self._check_altitude_violations():
-            reward += self.violation_penalty
-        # QoS: add positive bonus per user meeting QoS, no penalty for violation
-        if user_rates is not None:
-            reward += np.sum(user_rates >= self.min_user_rate) * self.qos_bonus
-        for i in range(self.num_uavs):
-            distance = np.linalg.norm(self.uav_positions[i] - self.target_positions[i])
-            reward -= distance
-        #  Handover penalty
-        handover_count = np.sum(self.association != self.prev_association)
-        reward -= handover_count * self.handover_penalty
-        reward -= self.movement_load_penalty * movement_cost
-        return reward
-    
-    def _compute_throughput(self) -> (float, np.ndarray):
-        """
-        Compute total network throughput (sum-rate) and per-user rates, associating each user to its nearest UAV.
-        Incorporates height-dependent LOS probability and path loss models.
-        """
-        total_rate = 0.0
-        user_rates = np.zeros(self.num_users)
-        new_association = np.zeros(self.num_users, dtype=int)
-        
-        # Find nearest UAV for each user (based on 3D distance)
-        for user_idx in range(self.num_users):
-            user_pos = self.user_positions[user_idx]
-            distances = np.linalg.norm(self.uav_positions - user_pos, axis=1)
-            new_association[user_idx] = np.argmin(distances)
-
-        # Track handovers (keep existing variable names)
-        self.prev_association = self.association.copy()
-        self.association = new_association
-
-        # Update handover log
-        handovers = (self.association != self.prev_association).astype(int)
-        self.handover_log.append(handovers)
-        if len(self.handover_log) > self.window_size:
-            self.handover_log.pop(0)
-
-        self._update_uav_loads()
-
-        # Compute SINR-based rate with height-dependent LOS and path loss
-        for user_idx in range(self.num_users):
-            uav_idx = self.association[user_idx]
-            user_pos = self.user_positions[user_idx]
-            uav_pos = self.uav_positions[uav_idx]
-            uav_height = uav_pos[2]
-            
-            # Compute 3D distance
-            d_ij = np.linalg.norm(user_pos - uav_pos) + 1e-3
-            
-            # Determine LOS/NLOS state based on height-dependent probability
-            los_prob = self._compute_los_probability(uav_height)
-            is_los = np.random.random() < los_prob
-            
-            # Compute path loss based on LOS/NLOS state
-            path_loss = self._compute_path_loss(d_ij, is_los, uav_height)
-            
-            # Compute shadowing/fading (different for LOS vs NLOS)
-            if is_los:
-                # LOS: lower shadowing variance
-                shadowing_db = np.random.normal(0, self.shadowing_std_los)
-            else:
-                # NLOS: higher shadowing variance
-                shadowing_db = np.random.normal(0, self.shadowing_std_nlos)
-            
-            # Convert shadowing from dB to linear scale
-            shadowing_linear = 10 ** (shadowing_db / 10.0)
-            
-            # Signal power with path loss and shadowing
-            signal = self.tx_power * shadowing_linear / path_loss
-
-            # Compute interference from other UAVs
-            interference = 0.0
-            for other_uav in range(self.num_uavs):
-                if other_uav != uav_idx:
-                    other_uav_pos = self.uav_positions[other_uav]
-                    other_uav_height = other_uav_pos[2]
-                    d_kj = np.linalg.norm(other_uav_pos - user_pos) + 1e-3
-                    
-                    # Determine LOS/NLOS for interfering link
-                    other_los_prob = self._compute_los_probability(other_uav_height)
-                    other_is_los = np.random.random() < other_los_prob
-                    
-                    # Compute path loss for interfering link
-                    other_path_loss = self._compute_path_loss(d_kj, other_is_los, other_uav_height)
-                    
-                    # Shadowing for interfering link
-                    if other_is_los:
-                        other_shadowing_db = np.random.normal(0, self.shadowing_std_los)
-                    else:
-                        other_shadowing_db = np.random.normal(0, self.shadowing_std_nlos)
-                    other_shadowing_linear = 10 ** (other_shadowing_db / 10.0)
-                    
-                    interference += self.tx_power * other_shadowing_linear / other_path_loss
-
-            # Compute SINR and rate
-            sinr = signal / (self.noise_power + interference)
-            rate = self.B * np.log2(1 + sinr)
-            
-            # Apply packet drop based on velocity and height (POINT 2)
-            packet_drop_rate = self._calculate_packet_drops(user_idx, uav_idx)
-            effective_rate = rate * (1 - packet_drop_rate)
-            
-            user_rates[user_idx] = effective_rate
-            total_rate += effective_rate
-
-        return total_rate, user_rates
-
-    def _update_uav_loads(self):
-        """Normalize number of served users per UAV into [0,1] load factors."""
-        counts = np.zeros(self.num_uavs, dtype=float)
-        for user_idx in range(self.num_users):
-            counts[self.association[user_idx]] += 1.0
-        if counts.max() > 0:
-            counts = counts / counts.max()
-        self.uav_loads = counts
-    
-    def _move_users(self):
-        """Move users with velocity considerations (POINT 2: UE velocity)."""
-        for i in range(self.num_users):
-            velocity = self.user_velocities[i]
-            # Movement distance based on velocity (assuming 1 time step = 1 second)
-            max_movement = velocity * 0.1  # Scale down for simulation
-            
-            movement = np.random.uniform(-max_movement, max_movement, size=2)
-            self.user_positions[i, :2] += movement
-            
-            # Update velocity occasionally
-            if np.random.random() < 0.1:  # 10% chance to change velocity
-                self.user_velocities[i] = max(0, self.user_velocities[i] + np.random.normal(0, 2))
-                
-                # Update velocity category
-                vel = self.user_velocities[i]
-                if vel < 5:
-                    self.user_velocity_categories[i] = 'LOW_MOBILITY'
-                elif vel < 15:
-                    self.user_velocity_categories[i] = 'MEDIUM_MOBILITY'
-                else:
-                    self.user_velocity_categories[i] = 'HIGH_MOBILITY'
-        
-        # Clip to grid bounds
-        self.user_positions[:, 0] = np.clip(self.user_positions[:, 0], 0, self.grid_size[0])
-        self.user_positions[:, 1] = np.clip(self.user_positions[:, 1], 0, self.grid_size[1])
-    
-    def step(self, actions: List[int]) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Take a step in the environment."""
-        # Convert actions to movements
-        # Height movements are in meters (1m steps for fine control)
-        movements = {
-            0: np.array([0, 0, 1.0]),   # up (increase height)
-            1: np.array([0, 0, -1.0]),  # down (decrease height)
-            2: np.array([0, 1, 0]),     # right
-            3: np.array([0, -1, 0]),    # left
-            4: np.array([1, 0, 0]),     # forward
-            5: np.array([-1, 0, 0])     # backward
-        }
-        
-        movement_cost = 0.0
+        # Apply actions to UAV positions
         for i, action in enumerate(actions):
-            move_vec = movements[action]
-            self.uav_positions[i] += move_vec
-            if action < 6:
-                load_factor = 1.0 + (self.uav_loads[i] if self.uav_loads is not None else 0.0)
-                movement_cost += np.linalg.norm(move_vec) * load_factor
+            if action == 0:   # up
+                self.uav_positions[i, 2] += 1
+            elif action == 1: # down
+                self.uav_positions[i, 2] -= 1
+            elif action == 2: # left
+                self.uav_positions[i, 0] -= 1
+            elif action == 3: # right
+                self.uav_positions[i, 0] += 1
+            elif action == 4: # forward
+                self.uav_positions[i, 1] += 1
+            elif action == 5: # backward
+                self.uav_positions[i, 1] -= 1
         
-        # Clip heights to valid range [5, 50] meters
+        # Clip positions to grid boundaries and enforce height limits [5, 50]
+        self.uav_positions[:, 0] = np.clip(self.uav_positions[:, 0], 0, self.grid_size[0])
+        self.uav_positions[:, 1] = np.clip(self.uav_positions[:, 1], 0, self.grid_size[1])
         self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
         
-        # POINT 2: Prefer higher altitudes for high mobility users
-        for uav_idx in range(self.num_uavs):
-            served_user_indices = [i for i in range(self.num_users) if self.association[i] == uav_idx]
-            if served_user_indices:
-                high_mobility_users = sum(1 for i in served_user_indices 
-                                        if self.user_velocity_categories[i] == 'HIGH_MOBILITY')
-                if high_mobility_users > len(served_user_indices) * 0.3:  # >30% high mobility
-                    # Increase height slightly for high mobility users
-                    self.uav_positions[uav_idx, 2] = min(self.uav_positions[uav_idx, 2] + 2.0, 50)
+        # Calculate reward, throughput, fairness, collisions
+        reward, info = self._calculate_reward_and_metrics()
         
-        # Move users with velocity before reward/throughput calculation
-        self._move_users()
-        # Calculate throughput and per-user rates
-        throughput, user_rates = self._compute_throughput()
-        # Calculate reward with QoS info
-        reward = self._calculate_reward(user_rates, movement_cost)
-        # Check violations
-        qos_violation = self._check_qos_violations(user_rates)
-        # Additional info
+        # Check if episode is done
+        done = self.current_step >= self.max_steps
+        
+        # Update plot if enabled
+        if self.enable_plotting:
+            self._update_plot()
+        
+        obs = self._get_obs()
+        return obs, reward, done, False, info
+
+    def _calculate_reward_and_metrics(self) -> Tuple[float, Dict]:
+        """
+        Calculate reward and performance metrics including throughput and fairness.
+        """
+        distances = np.zeros((self.num_uavs, self.num_users))
+        heights = np.zeros((self.num_uavs, self.num_users))
+        gains_db = np.zeros((self.num_uavs, self.num_users))
+        is_los_matrix = np.zeros((self.num_uavs, self.num_users), dtype=bool)
+        
+        # Calculate distances, heights, and channel gains
+        for i in range(self.num_uavs):
+            for j in range(self.num_users):
+                dx = self.uav_positions[i, 0] - self.user_positions[j, 0]
+                dy = self.uav_positions[i, 1] - self.user_positions[j, 1]
+                dz = self.uav_positions[i, 2] - self.user_positions[j, 2]
+                distance = np.sqrt(dx**2 + dy**2 + dz**2)
+                distances[i, j] = distance
+                heights[i, j] = self.uav_positions[i, 2]
+                path_loss_db, is_los = self.calculate_path_loss(distance, self.uav_positions[i, 2])
+                gains_db[i, j] = -path_loss_db
+                is_los_matrix[i, j] = is_los
+        
+        # Convert gains from dB to linear scale
+        gains_linear = 10 ** (gains_db / 10)
+        
+        # Calculate SNR and user rates for each UAV-user pair
+        noise_power_linear = 10 ** (self.noise_power_dbm / 10) / 1000
+        tx_power_linear = 10 ** (self.transmit_power_dbm / 10) / 1000
+        
+        sinr = (tx_power_linear * gains_linear) / noise_power_linear
+        rates = self.bandwidth * np.log2(1 + sinr)
+        
+        # Assign users to the best UAV based on SNR
+        best_uav_indices = np.argmax(sinr, axis=0)
+        uav_user_rates = [[] for _ in range(self.num_uavs)]
+        
+        for j in range(self.num_users):
+            uav_idx = best_uav_indices[j]
+            uav_user_rates[uav_idx].append(rates[uav_idx, j])
+        
+        # Calculate total throughput and fairness
+        total_throughput = 0.0
+        user_rates = []
+        qos_satisfied_users = 0
+        
+        for i in range(self.num_uavs):
+            if uav_user_rates[i]:
+                uav_rates = np.array(uav_user_rates[i])
+                total_throughput += np.sum(uav_rates)
+                user_rates.extend(uav_rates.tolist())
+                qos_satisfied_users += np.sum(uav_rates >= self.min_user_rate * 1e6)  # QoS in bps
+        
+        user_rates = np.array(user_rates) if user_rates else np.array([0.0])
+        mean_rate = np.mean(user_rates)
+        fairness = (mean_rate ** 2) / (np.mean(user_rates ** 2) + 1e-9)
+        
+        # Collision check: if any two UAVs are too close
+        collisions = False
+        min_distance = 1.0  # Minimum allowed distance between UAVs
+        for i in range(self.num_uavs):
+            for j in range(i + 1, self.num_uavs):
+                dx = self.uav_positions[i, 0] - self.uav_positions[j, 0]
+                dy = self.uav_positions[i, 1] - self.uav_positions[j, 1]
+                dz = self.uav_positions[i, 2] - self.uav_positions[j, 2]
+                distance = np.sqrt(dx**2 + dy**2 + dz**2)
+                if distance < min_distance:
+                    collisions = True
+                    break
+        
+        # Reward components
+        reward = total_throughput / 1e6  # Normalize to Mbps
+        reward += self.qos_bonus * (qos_satisfied_users / self.num_users)
+        
+        if collisions:
+            reward += self.collision_penalty
+        
         info = {
-            'collisions': self._check_collisions(),
-            'violations': self._check_boundary_violations(),
-            'altitude_violation': self._check_altitude_violations(),
-            'qos_violation': qos_violation,
-            'throughput': throughput,
+            'throughput': float(total_throughput),
+            'fairness': float(fairness),
+            'collisions': collisions,
+            'mean_rate': float(mean_rate),
             'user_rates': user_rates,
-            'handover_count': int(np.sum(self.association != self.prev_association)),
-            'movement_cost': movement_cost
+            'uav_positions': self.uav_positions.copy(),
+            'user_positions': self.user_positions.copy(),
+            'is_los': is_los_matrix,
+            'distances': distances,
+            'heights': heights
         }
-        done = self._check_collisions() or self._check_boundary_violations() or self._check_altitude_violations() or qos_violation
-        return self._get_observation(), reward, done, False, info 
+        
+        return float(reward), info
 
-    def render(self, mode='human', show=True):
-        """Visualize UAVs, users, and associations in 2D (nearest UAV association)."""
-        plt.figure(figsize=(7, 7))
-        # Plot users
-        user_xy = self.user_positions[:, :2]
-        plt.scatter(user_xy[:, 0], user_xy[:, 1], c='green', label='Users')
-        # Plot UAVs
-        uav_xy = self.uav_positions[:, :2]
-        boundary_viol = self._check_boundary_violations()
-        altitude_viol = self._check_altitude_violations()
-        uav_color = 'red' if boundary_viol or altitude_viol else 'blue'
-        plt.scatter(uav_xy[:, 0], uav_xy[:, 1], c=uav_color, s=100, marker='o', label='UAVs')
-        # Draw associations (user to nearest UAV)
-        for user_idx in range(self.num_users):
-            user = user_xy[user_idx]
-            min_dist = float('inf')
-            nearest_uav = 0
-            for uav_idx in range(self.num_uavs):
-                uav = self.uav_positions[uav_idx]
-                d = np.linalg.norm(self.user_positions[user_idx] - uav)
-                if d < min_dist:
-                    min_dist = d
-                    nearest_uav = uav_idx
-            uav = uav_xy[nearest_uav]
-            plt.plot([user[0], uav[0]], [user[1], uav[1]], 'gray', alpha=0.5)
-        plt.xlim(0, self.grid_size[0])
-        plt.ylim(0, self.grid_size[1])
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.title('UAV and User Positions (Nearest UAV Association)')
-        plt.legend()
-        plt.grid(True)
-        if show:
-            plt.show()
-        else:
-            plt.close()
+    def render(self):
+        """Render the environment (optional)."""
+        if self.enable_plotting:
+            self._update_plot()
 
-    # Optional: log positions for episode playback
-    def log_step(self, log_dict):
-        log_dict.setdefault('uav_positions', []).append(self.uav_positions.copy())
-        log_dict.setdefault('user_positions', []).append(self.user_positions.copy()) 
+    def close(self):
+        """Close the environment."""
+        if self.fig is not None:
+            plt.close(self.fig)
+            self.fig = None
+            self.ax = None
