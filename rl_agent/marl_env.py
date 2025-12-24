@@ -1,5 +1,23 @@
 """
 Multi-Agent Reinforcement Learning Environment for UAV coordination.
+
+This environment supports:
+- Height-dependent Line-of-Sight (LoS) probability modeling
+- UE velocity considerations for mobile users
+- Load-aware UAV movement penalties
+- Non-Stationary RL: Time-varying traffic demand and channel conditions
+- Performative RL: UE distribution adapts to long-term coverage patterns
+
+Non-Stationary RL Features:
+    - Traffic demand drifts over episodes (simulating time-of-day patterns)
+    - Channel conditions vary (simulating weather/interference changes)
+    - Observation space includes context features when enabled
+
+Performative RL Features:
+    - Coverage heatmap tracks spatial coverage quality
+    - UE distribution weights adapt based on historical coverage
+    - Creates feedback loop: policy affects UE distribution, which affects future policy
+    - Call end_episode() after each episode to update performative parameters
 """
 import numpy as np
 import gymnasium as gym
@@ -16,7 +34,9 @@ class MARLEnv(gym.Env):
                  device: torch.device = None,
                  min_user_rate: float = 0.5,
                  qos_bonus: float = 10.0,
-                 ue_height_range: Tuple[float, float] = (0.0, 5.0)):
+                 ue_height_range: Tuple[float, float] = (0.0, 5.0),
+                 enable_non_stationary: bool = False,
+                 enable_performative: bool = False):
         super(MARLEnv, self).__init__()
         self.num_uavs = num_uavs
         self.num_users = num_users
@@ -27,14 +47,45 @@ class MARLEnv(gym.Env):
         # NEW: UE heights in [0, 5] m (configurable)
         self.ue_height_range = ue_height_range
         
+        # Non-Stationary and Performative RL flags
+        self.enable_non_stationary = enable_non_stationary
+        self.enable_performative = enable_performative
+        self.episode_count = 0  # Track episodes for non-stationary drift
+        self.step_count = 0  # Track steps for gradual changes
+        
+        # Non-Stationary: Time-varying parameters
+        self.base_traffic_demand = 1.0  # Base traffic demand multiplier
+        self.traffic_drift_rate = 0.001  # How fast traffic patterns change per episode
+        self.channel_drift_rate = 0.0005  # Channel condition drift rate
+        
+        # Performative RL: UE distribution parameters
+        self.coverage_heatmap = None  # Grid-based coverage tracking
+        self.ue_distribution_weights = None  # Spatial weights for UE spawning
+        self.performative_update_rate = 0.1  # How fast UE distribution adapts to coverage
+        self.coverage_history_window = 50  # Episodes to average for coverage map
+        self.coverage_history = []  # Store recent coverage maps
+        
+        # Initialize coverage heatmap (grid cells for spatial tracking)
+        self.grid_cells_x = 10  # Number of grid cells in x direction
+        self.grid_cells_y = 10  # Number of grid cells in y direction
+        self.cell_size_x = grid_size[0] / self.grid_cells_x
+        self.cell_size_y = grid_size[1] / self.grid_cells_y
+        if self.enable_performative:
+            self.coverage_heatmap = np.ones((self.grid_cells_x, self.grid_cells_y)) / (self.grid_cells_x * self.grid_cells_y)
+            self.ue_distribution_weights = np.ones((self.grid_cells_x, self.grid_cells_y)) / (self.grid_cells_x * self.grid_cells_y)
+        
         # Define action space (6 possible movements: up, down, left, right, forward, backward)
         self.action_space = spaces.MultiDiscrete([6] * num_uavs)
         
         # Define observation space (x, y, z coordinates for each UAV)
         # Note: z (height) can now vary in expanded range [5, 50] meters
+        obs_dim = 3 * num_uavs  # Base: position per UAV
+        if enable_non_stationary:
+            obs_dim += 4  # Context features: episode_norm, traffic_demand, sin, cos
+        
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 5] * num_uavs),
-            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs),
+            low=np.array([0, 0, 5] * num_uavs + ([-np.inf] * 4 if enable_non_stationary else [])),
+            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs + ([np.inf] * 4 if enable_non_stationary else [])),
             dtype=np.float32
         )
         
@@ -121,6 +172,10 @@ class MARLEnv(gym.Env):
         """
         super().reset(seed=seed)
         
+        # Apply non-stationary drift
+        if self.enable_non_stationary:
+            self._apply_non_stationary_drift()
+        
         # Initialize UAV positions with diversity in height
         self.init_uav_positions = np.random.rand(self.num_uavs, 3)
         self.init_uav_positions[:, 0] *= self.grid_size[0]
@@ -128,10 +183,14 @@ class MARLEnv(gym.Env):
         # Initialize heights in range [10, 30] meters to start near optimal region
         self.init_uav_positions[:, 2] = 10 + np.random.rand(self.num_uavs) * 20
         
-        # Initialize user positions with heights between ue_height_range[0] and ue_height_range[1]
-        self.init_user_positions = np.random.rand(self.num_users, 3)
-        self.init_user_positions[:, 0] *= self.grid_size[0]
-        self.init_user_positions[:, 1] *= self.grid_size[1]
+        # Initialize user positions (with performative distribution if enabled)
+        if self.enable_performative and self.ue_distribution_weights is not None:
+            self.init_user_positions = self._sample_users_from_distribution()
+        else:
+            self.init_user_positions = np.random.rand(self.num_users, 3)
+            self.init_user_positions[:, 0] *= self.grid_size[0]
+            self.init_user_positions[:, 1] *= self.grid_size[1]
+        
         # NEW: UE heights from specified range (default 0–5 m)
         self.init_user_positions[:, 2] = np.random.uniform(
             self.ue_height_range[0],
@@ -161,6 +220,7 @@ class MARLEnv(gym.Env):
         
         # Reset step counter
         self.current_step = 0
+        self.step_count = 0
         
         # Initialize target positions (for potential trajectory planning)
         self.target_positions = self.uav_positions.copy()
@@ -215,8 +275,19 @@ class MARLEnv(gym.Env):
         plt.pause(0.01)
 
     def _get_obs(self) -> np.ndarray:
-        """Get the observation (UAV positions)."""
-        return self.uav_positions.flatten().astype(np.float32)
+        """Get the observation (UAV positions + optional non-stationary context)."""
+        obs = []
+        for i in range(self.num_uavs):
+            obs.extend(self.uav_positions[i])
+        
+        if self.enable_non_stationary:
+            # Add context features: normalized episode count, traffic demand, sin/cos of episode for periodicity
+            obs.append(self.episode_count / 1000.0)  # Normalize episode count
+            obs.append(self.base_traffic_demand)
+            obs.append(np.sin(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
+            obs.append(np.cos(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
+        
+        return np.array(obs, dtype=np.float32)
 
     def step(self, actions: List[int]):
         """
@@ -224,6 +295,7 @@ class MARLEnv(gym.Env):
         Actions: list of actions for each UAV (0: up, 1: down, 2: left, 3: right, 4: forward, 5: backward)
         """
         self.current_step += 1
+        self.step_count += 1
         
         # Apply actions to UAV positions
         for i, action in enumerate(actions):
@@ -245,8 +317,15 @@ class MARLEnv(gym.Env):
         self.uav_positions[:, 1] = np.clip(self.uav_positions[:, 1], 0, self.grid_size[1])
         self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
         
+        # Move users (for velocity considerations)
+        self._move_users()
+        
         # Calculate reward, throughput, fairness, collisions
         reward, info = self._calculate_reward_and_metrics()
+        
+        # Update coverage heatmap for performative RL
+        if self.enable_performative and 'user_rates' in info:
+            self._update_coverage_heatmap(info['user_rates'])
         
         # Check if episode is done
         done = self.current_step >= self.max_steps
@@ -298,6 +377,9 @@ class MARLEnv(gym.Env):
             uav_idx = best_uav_indices[j]
             uav_user_rates[uav_idx].append(rates[uav_idx, j])
         
+        # Apply non-stationary traffic demand multiplier
+        traffic_multiplier = self.base_traffic_demand if self.enable_non_stationary else 1.0
+        
         # Calculate total throughput and fairness
         total_throughput = 0.0
         user_rates = []
@@ -305,7 +387,7 @@ class MARLEnv(gym.Env):
         
         for i in range(self.num_uavs):
             if uav_user_rates[i]:
-                uav_rates = np.array(uav_user_rates[i])
+                uav_rates = np.array(uav_user_rates[i]) * traffic_multiplier
                 total_throughput += np.sum(uav_rates)
                 user_rates.extend(uav_rates.tolist())
                 qos_satisfied_users += np.sum(uav_rates >= self.min_user_rate * 1e6)  # QoS in bps
@@ -354,6 +436,140 @@ class MARLEnv(gym.Env):
         if self.enable_plotting:
             self._update_plot()
 
+    def _apply_non_stationary_drift(self):
+        """Apply non-stationary drift to environment parameters."""
+        if not self.enable_non_stationary:
+            return
+        
+        # Drift traffic demand (simulates time-of-day, seasonal changes)
+        drift = np.sin(self.episode_count * self.traffic_drift_rate) * 0.2
+        self.base_traffic_demand = 1.0 + drift
+        
+        # Drift channel conditions (simulates weather, interference changes)
+        channel_drift = np.cos(self.episode_count * self.channel_drift_rate) * 0.1
+        # Adjust shadowing variance slightly
+        self.shadowing_std_los = max(2.0, 3.0 + channel_drift)
+        self.shadowing_std_nlos = max(7.0, 8.0 + channel_drift * 2)
+    
+    def _move_users(self):
+        """Move users based on their velocities (for velocity considerations)."""
+        if self.user_velocities is None:
+            return
+        
+        for j in range(self.num_users):
+            velocity = self.user_velocities[j]
+            # Random direction movement
+            angle = np.random.uniform(0, 2 * np.pi)
+            dx = velocity * np.cos(angle) * 0.1  # Scale down movement
+            dy = velocity * np.sin(angle) * 0.1
+            
+            self.user_positions[j, 0] += dx
+            self.user_positions[j, 1] += dy
+            
+            # Wrap around boundaries
+            self.user_positions[j, 0] = self.user_positions[j, 0] % self.grid_size[0]
+            self.user_positions[j, 1] = self.user_positions[j, 1] % self.grid_size[1]
+            
+            # Occasionally update velocity category
+            if np.random.rand() < 0.01:  # 1% chance per step
+                if self.user_velocities[j] < 5:
+                    self.user_velocity_categories[j] = 'LOW_MOBILITY'
+                elif self.user_velocities[j] < 15:
+                    self.user_velocity_categories[j] = 'MEDIUM_MOBILITY'
+            else:
+                    self.user_velocity_categories[j] = 'HIGH_MOBILITY'
+    
+    def _sample_users_from_distribution(self) -> np.ndarray:
+        """Sample user positions from performative distribution weights."""
+        if self.ue_distribution_weights is None:
+            # Fallback to uniform distribution
+            positions = np.random.rand(self.num_users, 3)
+            positions[:, 0] *= self.grid_size[0]
+            positions[:, 1] *= self.grid_size[1]
+            return positions
+        
+        # Sample grid cells based on weights
+        flat_weights = self.ue_distribution_weights.flatten()
+        flat_weights = flat_weights / (flat_weights.sum() + 1e-9)
+        
+        positions = np.zeros((self.num_users, 3))
+        for i in range(self.num_users):
+            # Sample a grid cell
+            cell_idx = np.random.choice(len(flat_weights), p=flat_weights)
+            x_cell = cell_idx % self.grid_cells_x
+            y_cell = cell_idx // self.grid_cells_x
+            
+            # Sample uniformly within the cell
+            x = (x_cell + np.random.rand()) * self.cell_size_x
+            y = (y_cell + np.random.rand()) * self.cell_size_y
+            
+            positions[i, 0] = np.clip(x, 0, self.grid_size[0])
+            positions[i, 1] = np.clip(y, 0, self.grid_size[1])
+        
+        return positions
+    
+    def _update_coverage_heatmap(self, user_rates: np.ndarray):
+        """Update the coverage heatmap based on current user rates."""
+        if not self.enable_performative:
+            return
+        
+        current_coverage_map = np.zeros((self.grid_cells_x, self.grid_cells_y))
+        for user_idx in range(min(len(user_rates), self.num_users)):
+            x_grid = int(self.user_positions[user_idx, 0] / self.cell_size_x)
+            y_grid = int(self.user_positions[user_idx, 1] / self.cell_size_y)
+            
+            if 0 <= x_grid < self.grid_cells_x and 0 <= y_grid < self.grid_cells_y:
+                current_coverage_map[x_grid, y_grid] += user_rates[user_idx]
+        
+        # Exponential moving average for heatmap
+        if self.coverage_heatmap is None:
+            self.coverage_heatmap = current_coverage_map.copy()
+        else:
+            self.coverage_heatmap = self.coverage_heatmap * 0.9 + current_coverage_map * 0.1
+        
+        # Store for episodic averaging
+        self.coverage_history.append(current_coverage_map.copy())
+        if len(self.coverage_history) > self.coverage_history_window:
+            self.coverage_history.pop(0)
+    
+    def _update_ue_distribution_weights(self):
+        """Update the UE distribution weights based on long-term average coverage."""
+        if not self.enable_performative or not self.coverage_history:
+            return
+        
+        # Average recent coverage maps
+        avg_coverage = np.mean(self.coverage_history, axis=0)
+        
+        # Normalize to get a probability distribution
+        normalized_coverage = avg_coverage / (np.sum(avg_coverage) + 1e-9)
+        
+        # Update distribution weights gradually
+        if self.ue_distribution_weights is None:
+            self.ue_distribution_weights = normalized_coverage.copy()
+        else:
+            self.ue_distribution_weights = (
+                (1 - self.performative_update_rate) * self.ue_distribution_weights +
+                self.performative_update_rate * normalized_coverage
+            )
+        
+        # Add some exploration to avoid complete concentration
+        exploration_weight = 0.1
+        uniform_dist = np.ones_like(normalized_coverage) / (self.grid_cells_x * self.grid_cells_y)
+        self.ue_distribution_weights = (
+            (1 - exploration_weight) * self.ue_distribution_weights +
+            exploration_weight * uniform_dist
+        )
+        self.ue_distribution_weights = self.ue_distribution_weights / (self.ue_distribution_weights.sum() + 1e-9)
+    
+    def end_episode(self):
+        """Called at end of episode to update non-stationary and performative parameters."""
+        self.episode_count += 1
+        if self.enable_performative:
+            self._update_ue_distribution_weights()
+            # Clear history for next averaging window periodically
+            if self.episode_count % self.coverage_history_window == 0:
+                self.coverage_history = []
+    
     def close(self):
         """Close the environment."""
         if self.fig is not None:
