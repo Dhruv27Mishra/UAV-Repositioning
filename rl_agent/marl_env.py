@@ -82,10 +82,13 @@ class MARLEnv(gym.Env):
         obs_dim = 3 * num_uavs  # Base: position per UAV
         if enable_non_stationary:
             obs_dim += 4  # Context features: episode_norm, traffic_demand, sin, cos
+        # Add UE mobility context for non-stationarity (Type a)
+        if enable_non_stationary:
+            obs_dim += 3  # Average UE mobility rate, direction variance, mobility concentration
         
         self.observation_space = spaces.Box(
-            low=np.array([0, 0, 5] * num_uavs + ([-np.inf] * 4 if enable_non_stationary else [])),
-            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs + ([np.inf] * 4 if enable_non_stationary else [])),
+            low=np.array([0, 0, 5] * num_uavs + ([-np.inf] * (7 if enable_non_stationary else 0))),
+            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs + ([np.inf] * (7 if enable_non_stationary else 0))),
             dtype=np.float32
         )
         
@@ -101,6 +104,12 @@ class MARLEnv(gym.Env):
         # UE velocity tracking (POINT 2: UE velocity considerations)
         self.user_velocities = None
         self.user_velocity_categories = None  # LOW_MOBILITY, MEDIUM_MOBILITY, HIGH_MOBILITY
+        
+        # UE Movement Non-Stationarity (Type a): Track UE mobility patterns
+        self.ue_mobility_history = []  # Track UE position history for mobility analysis
+        self.ue_mobility_rates = None  # Average mobility rate per UE
+        self.ue_direction_vectors = None  # Current direction of movement per UE
+        self.mobility_non_stationarity_window = 10  # Steps to track for mobility patterns
         
         # Height-dependent LOS probability model (POINT 1: Height-dependent LOS probability)
         self.optimal_height = 20.0  # Optimal height in meters for maximizing LOS probability
@@ -121,6 +130,9 @@ class MARLEnv(gym.Env):
         # Maximum steps per episode
         self.max_steps = 50
         self.current_step = 0
+        
+        # Optional association function from agent (for novel algorithms)
+        self.association_function = None
         
         # For plotting and debugging
         self.enable_plotting = False
@@ -190,13 +202,13 @@ class MARLEnv(gym.Env):
             self.init_user_positions = np.random.rand(self.num_users, 3)
             self.init_user_positions[:, 0] *= self.grid_size[0]
             self.init_user_positions[:, 1] *= self.grid_size[1]
-        
-        # NEW: UE heights from specified range (default 0–5 m)
-        self.init_user_positions[:, 2] = np.random.uniform(
-            self.ue_height_range[0],
-            self.ue_height_range[1],
-            self.num_users
-        )
+            
+            # NEW: UE heights from specified range (default 0–5 m)
+            self.init_user_positions[:, 2] = np.random.uniform(
+                self.ue_height_range[0],
+                self.ue_height_range[1],
+                self.num_users
+            )
         
         # Initialize user velocities and categories (POINT 2: UE velocity considerations)
         self.init_user_velocities = np.random.uniform(0, 30, self.num_users)  # 0-30 m/s
@@ -214,6 +226,11 @@ class MARLEnv(gym.Env):
         self.user_positions = self.init_user_positions.copy()
         self.user_velocities = self.init_user_velocities.copy()
         self.user_velocity_categories = self.init_user_velocity_categories.copy()
+        
+        # Initialize UE mobility non-stationarity tracking (Type a)
+        self.ue_mobility_history = [self.user_positions.copy()]
+        self.ue_mobility_rates = np.zeros(self.num_users)
+        self.ue_direction_vectors = np.zeros((self.num_users, 2))
         
         # Initialize UAV loads
         self.uav_loads = np.zeros(self.num_uavs)
@@ -286,6 +303,24 @@ class MARLEnv(gym.Env):
             obs.append(self.base_traffic_demand)
             obs.append(np.sin(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
             obs.append(np.cos(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
+            
+            # Add UE mobility non-stationarity context (Type a)
+            if len(self.ue_mobility_history) > 1:
+                # Calculate average mobility rate
+                avg_mobility = np.mean(self.ue_mobility_rates) if self.ue_mobility_rates is not None else 0.0
+                # Calculate direction variance (how spread out UE movements are)
+                direction_variance = np.var(self.ue_direction_vectors) if self.ue_direction_vectors is not None else 0.0
+                # Calculate mobility concentration (how clustered mobile UEs are)
+                mobile_ues = np.sum(self.ue_mobility_rates > 5.0) if self.ue_mobility_rates is not None else 0
+                mobility_concentration = mobile_ues / max(self.num_users, 1.0)
+            else:
+                avg_mobility = 0.0
+                direction_variance = 0.0
+                mobility_concentration = 0.0
+            
+            obs.append(avg_mobility / 30.0)  # Normalize by max velocity
+            obs.append(direction_variance)
+            obs.append(mobility_concentration)
         
         return np.array(obs, dtype=np.float32)
 
@@ -369,8 +404,17 @@ class MARLEnv(gym.Env):
         sinr = (tx_power_linear * gains_linear) / noise_power_linear
         rates = self.bandwidth * np.log2(1 + sinr)
         
-        # Assign users to the best UAV based on SNR
-        best_uav_indices = np.argmax(sinr, axis=0)
+        # Simple SNR-based association (can be overridden by agent's association function)
+        if hasattr(self, 'association_function') and self.association_function is not None:
+            # Use agent-provided association function
+            best_uav_indices = self.association_function(sinr, rates, distances, is_los_matrix, 
+                                                         self.uav_positions, self.user_positions,
+                                                         self.user_velocities, self.coverage_heatmap,
+                                                         self.grid_cells_x, self.grid_cells_y,
+                                                         self.cell_size_x, self.cell_size_y)
+        else:
+            # Default: simple SNR-based association
+            best_uav_indices = np.argmax(sinr, axis=0)
         uav_user_rates = [[] for _ in range(self.num_uavs)]
         
         for j in range(self.num_users):
@@ -452,13 +496,16 @@ class MARLEnv(gym.Env):
         self.shadowing_std_nlos = max(7.0, 8.0 + channel_drift * 2)
     
     def _move_users(self):
-        """Move users based on their velocities (for velocity considerations)."""
+        """Move users based on their velocities (for velocity considerations).
+        Also tracks UE mobility for non-stationarity modeling (Type a)."""
         if self.user_velocities is None:
             return
         
+        prev_positions = self.user_positions.copy()
+        
         for j in range(self.num_users):
             velocity = self.user_velocities[j]
-            # Random direction movement
+            # Random direction movement (can be made more realistic with waypoint model)
             angle = np.random.uniform(0, 2 * np.pi)
             dx = velocity * np.cos(angle) * 0.1  # Scale down movement
             dy = velocity * np.sin(angle) * 0.1
@@ -470,6 +517,15 @@ class MARLEnv(gym.Env):
             self.user_positions[j, 0] = self.user_positions[j, 0] % self.grid_size[0]
             self.user_positions[j, 1] = self.user_positions[j, 1] % self.grid_size[1]
             
+            # Track movement for non-stationarity (Type a)
+            if self.enable_non_stationary:
+                movement_distance = np.sqrt(dx**2 + dy**2)
+                self.ue_mobility_rates[j] = movement_distance * 10  # Convert to m/s equivalent
+                if movement_distance > 0:
+                    self.ue_direction_vectors[j] = np.array([dx, dy]) / movement_distance
+                else:
+                    self.ue_direction_vectors[j] = np.array([0.0, 0.0])
+            
             # Occasionally update velocity category
             if np.random.rand() < 0.01:  # 1% chance per step
                 if self.user_velocities[j] < 5:
@@ -478,6 +534,16 @@ class MARLEnv(gym.Env):
                     self.user_velocity_categories[j] = 'MEDIUM_MOBILITY'
             else:
                     self.user_velocity_categories[j] = 'HIGH_MOBILITY'
+        
+        # Update mobility history for non-stationarity tracking (Type a)
+        if self.enable_non_stationary:
+            self.ue_mobility_history.append(self.user_positions.copy())
+            if len(self.ue_mobility_history) > self.mobility_non_stationarity_window:
+                self.ue_mobility_history.pop(0)
+    
+    def set_association_function(self, association_func):
+        """Set a custom association function from the agent."""
+        self.association_function = association_func
     
     def _sample_users_from_distribution(self) -> np.ndarray:
         """Sample user positions from performative distribution weights."""
