@@ -439,7 +439,15 @@ class MARLEnv(gym.Env):
         user_rates = np.array(user_rates) if user_rates else np.array([0.0])
         mean_rate = np.mean(user_rates)
         fairness = (mean_rate ** 2) / (np.mean(user_rates ** 2) + 1e-9)
-        
+        # ---- EXTRA METRICS FOR YOUR PLOTS ----
+        min_rate = float(np.min(user_rates))  # bps
+
+        qos_threshold_bps = self.min_user_rate * 1e6  # since min_user_rate is in Mbps
+        qos_ratio = float(np.mean(user_rates >= qos_threshold_bps))  # fraction of users meeting QoS
+
+        # "Goodness" (define it as you like; this is a reasonable default)
+        # Mix QoS satisfaction + fairness + mean rate (scaled)
+        goodness = 0.5 * qos_ratio + 0.3 * float(fairness) + 0.2 * float(mean_rate / 1e6)
         # Collision check: if any two UAVs are too close
         collisions = False
         min_distance = 1.0  # Minimum allowed distance between UAVs
@@ -470,6 +478,9 @@ class MARLEnv(gym.Env):
             'user_positions': self.user_positions.copy(),
             'is_los': is_los_matrix,
             'distances': distances,
+            'min_rate': float(min_rate),         # bps
+            'qos_ratio': float(qos_ratio),        # 0..1
+            'goodness': float(goodness),
             'heights': heights
         }
         

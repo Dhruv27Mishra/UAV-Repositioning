@@ -83,7 +83,8 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
     
     episode_rewards = []
     episode_throughputs = []
-    
+    episode_min_rates = []
+    episode_goodness = []
     print(f"  Running {num_episodes} episodes...")
     
     for episode in tqdm(range(num_episodes), desc=f"  {agent_name}", leave=False):
@@ -91,6 +92,8 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
         done = False
         episode_reward = 0.0
         episode_throughput = 0.0
+        episode_min_rate = float('inf')
+        episode_goodness_sum = 0.0
         step_count = 0
         
         obs_tensor = torch.tensor(obs, device=device, dtype=torch.float32)
@@ -131,6 +134,8 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
             episode_reward += reward
             episode_throughput += info.get('throughput', 0.0)
             step_count += 1
+            episode_min_rate = min(episode_min_rate, info.get('min_rate', episode_min_rate))
+            episode_goodness_sum += info.get('goodness', 0.0)
             
             # Convert next observation to tensor
             next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32)
@@ -195,10 +200,17 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
         
         episode_rewards.append(episode_reward)
         episode_throughputs.append(episode_throughput)
-    
+        if episode_min_rate == float('inf'):
+            episode_min_rate = 0.0
+
+        episode_min_rates.append(episode_min_rate)
+        episode_goodness.append(episode_goodness_sum / max(1, step_count))
+            
     return {
         'rewards': episode_rewards,
-        'throughputs': episode_throughputs
+        'throughputs': episode_throughputs,
+        'min_rates': episode_min_rates,
+        'goodness': episode_goodness
     }
 
 
@@ -316,7 +328,210 @@ def plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced,
     print("✓ Saved RL models convergence comparison to 'rl_models_convergence_comparison.png'")
     plt.close('all')
 
+# ===================== SWEEPS + 3-GRAPH PLOTTING =====================
 
+def summarize_last(results, last_n=100):
+    last_n = min(last_n, len(results['throughputs']))
+    tp_gbps = np.mean(results['throughputs'][-last_n:]) / 1e9
+    min_rate_mbps = np.mean(results['min_rates'][-last_n:]) / 1e6
+    goodness = np.mean(results['goodness'][-last_n:])
+    return tp_gbps, min_rate_mbps, goodness
+
+
+def sweep_ue_density(agent_class, agent_name, device, grid_size,
+                     num_uavs=3, user_list=(5,10,15,20,30,40),
+                     num_episodes=400, num_steps_per_episode=30,
+                     enable_non_stationary=True, enable_performative=True,
+                     learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                     last_n=100):
+    xs, y_tp, y_minrate = [], [], []
+
+    for U in user_list:
+        env = MARLEnv(num_uavs=num_uavs, num_users=U, grid_size=grid_size, device=device,
+                      enable_non_stationary=enable_non_stationary, enable_performative=enable_performative)
+
+        results = train_model(agent_class, agent_name, env,
+                              num_episodes=num_episodes, num_steps_per_episode=num_steps_per_episode,
+                              learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
+                              device=device, context_dim=context_dim)
+
+        tp_gbps, min_rate_mbps, _ = summarize_last(results, last_n=last_n)
+        xs.append(U); y_tp.append(tp_gbps); y_minrate.append(min_rate_mbps)
+
+    return np.array(xs), np.array(y_tp), np.array(y_minrate)
+
+
+def sweep_threshold(agent_class, agent_name, device, grid_size,
+                    num_uavs=3, num_users=20,
+                    threshold_list=(0.2,0.4,0.6,0.8,1.0),  # Mbps
+                    num_episodes=400, num_steps_per_episode=30,
+                    enable_non_stationary=True, enable_performative=True,
+                    learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                    last_n=100):
+    xs, y_good = [], []
+
+    for thr_mbps in threshold_list:
+        env = MARLEnv(num_uavs=num_uavs, num_users=num_users, grid_size=grid_size, device=device,
+                      enable_non_stationary=enable_non_stationary, enable_performative=enable_performative)
+
+        # Threshold in your env = QoS min_user_rate (Mbps)
+        env.min_user_rate = float(thr_mbps)
+
+        results = train_model(agent_class, agent_name, env,
+                              num_episodes=num_episodes, num_steps_per_episode=num_steps_per_episode,
+                              learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
+                              device=device, context_dim=context_dim)
+
+        _, _, goodness = summarize_last(results, last_n=last_n)
+        xs.append(thr_mbps); y_good.append(goodness)
+
+    return np.array(xs), np.array(y_good)
+
+def plot_3_graphs(x_users, y_tp_gbps, y_minrate_mbps, x_thr_mbps, y_goodness,
+                  out_png="three_graphs.png"):
+    plt.figure(figsize=(18, 5))
+
+    plt.subplot(1, 3, 1)
+    plt.plot(x_users, y_tp_gbps, marker='o')
+    plt.xlabel("UE Density (Number of Users)")
+    plt.ylabel("System Throughput (Gbps)")
+    plt.title("System Throughput vs UE Density")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+
+    plt.subplot(1, 3, 2)
+    plt.plot(x_users, y_minrate_mbps, marker='o')
+    plt.xlabel("UE Density (Number of Users)")
+    plt.ylabel("Min User Data Rate (Mbps)")
+    plt.title("Min User Data Rate vs UE Density")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+
+    plt.subplot(1, 3, 3)
+    plt.plot(x_thr_mbps, y_goodness, marker='o')
+    plt.xlabel("QoS Threshold (min_user_rate, Mbps)")
+    plt.ylabel("Goodness")
+    plt.title("Goodness vs Threshold")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=200, bbox_inches="tight")
+    print(f"✓ Saved {out_png}")
+    plt.close()
+def summarize_last(results, last_n=100):
+    last_n = min(last_n, len(results['throughputs']))
+    tp_gbps = np.mean(results['throughputs'][-last_n:]) / 1e9
+    min_rate_mbps = np.mean(results['min_rates'][-last_n:]) / 1e6
+    goodness = np.mean(results['goodness'][-last_n:])
+    return tp_gbps, min_rate_mbps, goodness
+
+
+def sweep_ue_density_multi(agents_dict, device, grid_size,
+                           num_uavs=3, user_list=(5,10,15,20,30,40),
+                           num_episodes=300, num_steps_per_episode=30,
+                           env_flags=None,
+                           learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                           last_n=100):
+    """
+    env_flags = dict(enable_non_stationary=..., enable_performative=..., min_user_rate=...)
+    """
+    env_flags = env_flags or {}
+    curves = {}
+
+    for agent_name, agent_class in agents_dict.items():
+        xs, y_tp, y_minrate = [], [], []
+
+        for U in user_list:
+            env = MARLEnv(num_uavs=num_uavs, num_users=U, grid_size=grid_size, device=device,
+                          enable_non_stationary=env_flags.get("enable_non_stationary", False),
+                          enable_performative=env_flags.get("enable_performative", False))
+
+            # Same QoS threshold for everyone (unless you’re sweeping it separately)
+            if "min_user_rate" in env_flags:
+                env.min_user_rate = float(env_flags["min_user_rate"])
+
+            results = train_model(agent_class, agent_name, env,
+                                  num_episodes=num_episodes, num_steps_per_episode=num_steps_per_episode,
+                                  learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
+                                  device=device, context_dim=context_dim)
+
+            tp_gbps, min_rate_mbps, _ = summarize_last(results, last_n=last_n)
+            xs.append(U); y_tp.append(tp_gbps); y_minrate.append(min_rate_mbps)
+
+        curves[agent_name] = {"x": np.array(xs), "throughput": np.array(y_tp), "minrate": np.array(y_minrate)}
+
+    return curves
+
+
+def sweep_threshold_multi(agents_dict, device, grid_size,
+                          num_uavs=3, num_users=20,
+                          threshold_list=(0.2,0.4,0.6,0.8,1.0),  # Mbps
+                          num_episodes=300, num_steps_per_episode=30,
+                          env_flags=None,
+                          learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                          last_n=100):
+    env_flags = env_flags or {}
+    curves = {}
+
+    for agent_name, agent_class in agents_dict.items():
+        xs, y_good = [], []
+
+        for thr_mbps in threshold_list:
+            env = MARLEnv(num_uavs=num_uavs, num_users=num_users, grid_size=grid_size, device=device,
+                          enable_non_stationary=env_flags.get("enable_non_stationary", False),
+                          enable_performative=env_flags.get("enable_performative", False))
+
+            # Sweep QoS threshold (same meaning for all agents)
+            env.min_user_rate = float(thr_mbps)
+
+            results = train_model(agent_class, agent_name, env,
+                                  num_episodes=num_episodes, num_steps_per_episode=num_steps_per_episode,
+                                  learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
+                                  device=device, context_dim=context_dim)
+
+            _, _, goodness = summarize_last(results, last_n=last_n)
+            xs.append(thr_mbps); y_good.append(goodness)
+
+        curves[agent_name] = {"x": np.array(xs), "goodness": np.array(y_good)}
+
+    return curves
+
+
+def plot_3_graphs_multi(curves_density, curves_threshold, out_png="three_graphs_multi.png"):
+    plt.figure(figsize=(18, 5))
+
+    # 1) Throughput vs UE density
+    plt.subplot(1, 3, 1)
+    for agent_name, data in curves_density.items():
+        plt.plot(data["x"], data["throughput"], marker='o', label=agent_name)
+    plt.xlabel("UE Density (Number of Users)")
+    plt.ylabel("System Throughput (Gbps)")
+    plt.title("System Throughput vs UE Density")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+    plt.legend(fontsize=9)
+
+    # 2) Min rate vs UE density
+    plt.subplot(1, 3, 2)
+    for agent_name, data in curves_density.items():
+        plt.plot(data["x"], data["minrate"], marker='o', label=agent_name)
+    plt.xlabel("UE Density (Number of Users)")
+    plt.ylabel("Min User Data Rate (Mbps)")
+    plt.title("Min User Data Rate vs UE Density")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+    plt.legend(fontsize=9)
+
+    # 3) Goodness vs threshold
+    plt.subplot(1, 3, 3)
+    for agent_name, data in curves_threshold.items():
+        plt.plot(data["x"], data["goodness"], marker='o', label=agent_name)
+    plt.xlabel("QoS Threshold (min_user_rate, Mbps)")
+    plt.ylabel("Goodness")
+    plt.title("Goodness vs Threshold")
+    plt.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
+    plt.legend(fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=200, bbox_inches="tight")
+    print(f"✓ Saved {out_png}")
+    plt.close()
 def main():
     """Main function to run RL models convergence comparison."""
     print("="*70)
@@ -387,7 +602,34 @@ def main():
     print("Generating convergence comparison plots...")
     print(f"{'='*70}")
     plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced, num_episodes)
-    
+    # ===================== 3-GRAPH SWEEP EXPERIMENT =====================
+
+    agent_class = AdaptiveNonStationaryMARL
+    agent_name = "AdaptiveNonStationaryMARL"
+
+    user_list = [5, 10, 15, 20, 30, 40]
+    thr_list_mbps = [0.2, 0.4, 0.6, 0.8, 1.0]
+
+    xU, yTP, yMIN = sweep_ue_density(
+        agent_class, agent_name, device=device, grid_size=grid_size,
+        num_uavs=num_uavs, user_list=user_list,
+        num_episodes=400, num_steps_per_episode=num_steps_per_episode,
+        enable_non_stationary=True, enable_performative=True,
+        learning_rate=learning_rate, gamma=gamma, epsilon=epsilon, context_dim=context_dim,
+        last_n=100
+    )
+
+    xT, yG = sweep_threshold(
+        agent_class, agent_name, device=device, grid_size=grid_size,
+        num_uavs=num_uavs, num_users=20,
+        threshold_list=thr_list_mbps,
+        num_episodes=400, num_steps_per_episode=num_steps_per_episode,
+        enable_non_stationary=True, enable_performative=True,
+        learning_rate=learning_rate, gamma=gamma, epsilon=epsilon, context_dim=context_dim,
+        last_n=100
+    )
+
+    plot_3_graphs(xU, yTP, yMIN, xT, yG, out_png="three_graphs.png")
     # Print summary
     print(f"\n{'='*70}")
     print("CONVERGENCE SUMMARY")
