@@ -63,7 +63,7 @@ def train_model(
     agent_name,
     env,
     num_episodes=1000,
-    num_steps_per_episode=30,
+    num_steps_per_episode=50,
     learning_rate=0.001,
     gamma=0.99,
     epsilon=0.1,
@@ -327,9 +327,9 @@ def sweep_ue_density_multi(
     device,
     grid_size,
     num_uavs=3,
-    user_list=(5, 10, 15, 20, 30, 40),
+    user_list=(5, 10, 15, 20, 25, 30),
     num_episodes=1000,
-    num_steps_per_episode=30,
+    num_steps_per_episode=50,
     env_flags=None,
     learning_rate=0.001,
     gamma=0.99,
@@ -371,9 +371,9 @@ def sweep_ue_density_multi(
                 context_dim=context_dim
             )
 
-            tp_gbps, min_rate_mbps, _ = summarize_last(results, last_n=last_n)
+            tp_mbps, min_rate_mbps, _ = summarize_last(results, last_n=last_n)
             xs.append(U)
-            y_tp.append(tp_gbps)
+            y_tp.append(tp_mbps)
             y_minrate.append(min_rate_mbps)
 
         curves[agent_name] = {
@@ -393,7 +393,7 @@ def sweep_threshold_multi(
     num_users=20,
     threshold_list=(0.2, 0.4, 0.6, 0.8, 1.0),  # Mbps
     num_episodes=1000,
-    num_steps_per_episode=30,
+    num_steps_per_episode=50,
     env_flags=None,
     learning_rate=0.001,
     gamma=0.99,
@@ -553,12 +553,12 @@ def main():
     )
 
     # Sweep points
-    user_list = [5, 10, 15, 20, 30]
+    user_list = [5, 10, 15, 20, 25, 30]
     thr_list_mbps = [0.2, 0.5, 1.0, 2.0]
 
     # Training length (increase for better curves; decrease to run faster)
     num_episodes = 1000
-    num_steps_per_episode = 30
+    num_steps_per_episode = 50
     last_n = 250
 
     print("\nRunning UE density sweep (this trains each agent per point)...")
