@@ -45,27 +45,24 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def summarize_last(results, last_n=100):
-    """
-    Returns:
-      tp_gbps: mean throughput over last_n episodes (Gbps)
-      min_rate_mbps: mean min user rate over last_n episodes (Mbps)
-      goodness: mean goodness over last_n episodes (scalar)
-    """
+def summarize_last(results, last_n=250):
     last_n = min(last_n, len(results["throughputs"]))
-    tp_gbps = float(np.mean(results["throughputs"][-last_n:]) / 1e9)
+
+    # bps -> Mbps
+    tp_mbps = float(np.mean(results["throughputs"][-last_n:]) / 1e6)
+
+    # bps -> Mbps
     min_rate_mbps = float(np.mean(results["min_rates"][-last_n:]) / 1e6)
-    goodness = float(np.mean(results["goodness"][-last_n:]))
-    return tp_gbps, min_rate_mbps, goodness
 
-
+    goodness = float(np.mean(results["goodness"][-last_n:]))  # keep raw for now
+    return tp_mbps, min_rate_mbps, goodness
 # ------------------------- Training -------------------------
 
 def train_model(
     agent_class,
     agent_name,
     env,
-    num_episodes=300,
+    num_episodes=1000,
     num_steps_per_episode=30,
     learning_rate=0.001,
     gamma=0.99,
@@ -331,14 +328,14 @@ def sweep_ue_density_multi(
     grid_size,
     num_uavs=3,
     user_list=(5, 10, 15, 20, 30, 40),
-    num_episodes=300,
+    num_episodes=1000,
     num_steps_per_episode=30,
     env_flags=None,
     learning_rate=0.001,
     gamma=0.99,
     epsilon=0.1,
     context_dim=7,
-    last_n=100
+    last_n=250
 ):
     """
     Returns curves:
@@ -395,14 +392,14 @@ def sweep_threshold_multi(
     num_uavs=3,
     num_users=20,
     threshold_list=(0.2, 0.4, 0.6, 0.8, 1.0),  # Mbps
-    num_episodes=300,
+    num_episodes=1000,
     num_steps_per_episode=30,
     env_flags=None,
     learning_rate=0.001,
     gamma=0.99,
     epsilon=0.1,
     context_dim=7,
-    last_n=100
+    last_n=250
 ):
     """
     Returns curves:
@@ -449,45 +446,70 @@ def sweep_threshold_multi(
 
 # ------------------------- Plotting -------------------------
 
-def plot_3_graphs_multi(curves_density, curves_threshold, out_png="three_graphs_multi.png"):
-    plt.figure(figsize=(18, 5))
+def plot_3_separate_graphs(curves_density, curves_threshold, user_list, thr_list_mbps,
+                           out_prefix="paper_style"):
+    """
+    Saves:
+      {out_prefix}_throughput_vs_density.png
+      {out_prefix}_minrate_vs_density.png
+      {out_prefix}_goodness_vs_threshold.png
+    Paper-style axes:
+      - density x-axis shown as 1..K (density level index)
+      - throughput in Mbps
+      - min-rate label as LBT (Mbps)
+      - goodness normalized to 0..1 per agent
+    """
+    x_density = np.arange(1, len(user_list) + 1)
 
-    # 1) Throughput vs UE density
-    plt.subplot(1, 3, 1)
+    # (1) Throughput vs User Density
+    plt.figure(figsize=(7.5, 5))
     for agent_name, data in curves_density.items():
-        plt.plot(data["x"], data["throughput"], marker="o", label=agent_name)
-    plt.xlabel("UE Density (Number of Users)")
-    plt.ylabel("System Throughput (Gbps)")
-    plt.title("System Throughput vs UE Density")
-    plt.grid(True, alpha=0.4, linestyle="--", linewidth=0.8)
-    plt.legend(fontsize=8)
-
-    # 2) Min user rate vs UE density
-    plt.subplot(1, 3, 2)
-    for agent_name, data in curves_density.items():
-        plt.plot(data["x"], data["minrate"], marker="o", label=agent_name)
-    plt.xlabel("UE Density (Number of Users)")
-    plt.ylabel("Min User Data Rate (Mbps)")
-    plt.title("Min User Data Rate vs UE Density")
-    plt.grid(True, alpha=0.4, linestyle="--", linewidth=0.8)
-    plt.legend(fontsize=8)
-
-    # 3) Goodness vs threshold
-    plt.subplot(1, 3, 3)
-    for agent_name, data in curves_threshold.items():
-        plt.plot(data["x"], data["goodness"], marker="o", label=agent_name)
-    plt.xlabel("QoS Threshold (min_user_rate, Mbps)")
-    plt.ylabel("Goodness")
-    plt.title("Goodness vs Threshold")
-    plt.grid(True, alpha=0.4, linestyle="--", linewidth=0.8)
-    plt.legend(fontsize=8)
-
+        plt.plot(x_density, data["throughput"], marker="o", label=agent_name)
+    plt.xlabel("User Density")
+    plt.ylabel("System Throughput (Mbps)")
+    plt.title("System Throughput vs User Density")
+    plt.xticks(x_density)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8, loc="upper left")
+    out1 = f"{out_prefix}_throughput_vs_density.png"
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200, bbox_inches="tight")
-    print(f"✓ Saved {out_png}")
+    plt.savefig(out1, dpi=200, bbox_inches="tight")
     plt.close()
+    print(f"✓ Saved {out1}")
 
+    # (2) Minimum User Data Rate vs UE Density
+    plt.figure(figsize=(7.5, 5))
+    for agent_name, data in curves_density.items():
+        plt.plot(x_density, data["minrate"], marker="o", label=agent_name)
+    plt.xlabel("Number of Users (UE Density)")
+    plt.ylabel("LBT (Mbps)")
+    plt.title("Minimum User Data Rate vs UE Density")
+    plt.xticks(x_density)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8, loc="upper right")
+    out2 = f"{out_prefix}_minrate_vs_density.png"
+    plt.tight_layout()
+    plt.savefig(out2, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Saved {out2}")
 
+    # (3) Goodness vs Threshold
+    plt.figure(figsize=(7.5, 5))
+    for agent_name, data in curves_threshold.items():
+        g = np.array(data["goodness"], dtype=float)
+        g_norm = (g - g.min()) / (g.max() - g.min() + 1e-9)  # normalize 0..1
+        plt.plot(thr_list_mbps, g_norm, marker="o", label=agent_name)
+    plt.xlabel("Threshold (Mbps)")
+    plt.ylabel("Goodness")
+    plt.title("Goodness vs Threshold Comparison")
+    plt.ylim(0.0, 1.0)
+    plt.grid(True, alpha=0.3)
+    plt.legend(fontsize=8, loc="upper right")
+    out3 = f"{out_prefix}_goodness_vs_threshold.png"
+    plt.tight_layout()
+    plt.savefig(out3, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"✓ Saved {out3}")
 # ------------------------- Main -------------------------
 
 def main():
@@ -535,9 +557,9 @@ def main():
     thr_list_mbps = [0.2, 0.5, 1.0, 2.0]
 
     # Training length (increase for better curves; decrease to run faster)
-    num_episodes = 300
+    num_episodes = 1000
     num_steps_per_episode = 30
-    last_n = 100
+    last_n = 250
 
     print("\nRunning UE density sweep (this trains each agent per point)...")
     curves_density = sweep_ue_density_multi(
@@ -575,7 +597,9 @@ def main():
     )
 
     print("\nPlotting 3 graphs...")
-    plot_3_graphs_multi(curves_density, curves_threshold, out_png="three_graphs_multi.png")
+    plot_3_separate_graphs(curves_density, curves_threshold,
+                       user_list=user_list, thr_list_mbps=thr_list_mbps,
+                       out_prefix="paper_style")
     print("✅ Done.")
 
 
