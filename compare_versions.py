@@ -50,7 +50,7 @@ class OldMARLEnv(MARLEnv):
         """Old version: simple path loss without LOS/NLOS distinction."""
         return distance ** self.path_loss_exp
     
-    def _compute_throughput(self) -> (float, np.ndarray):
+    def _compute_throughput(self) -> tuple[float, np.ndarray]:
         """Old version: simple throughput calculation without height-dependent LOS."""
         total_rate = 0.0
         user_rates = np.zeros(self.num_users)
