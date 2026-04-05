@@ -1,7 +1,13 @@
 """
-Compare convergence of novel algorithm (AdaptiveNonStationaryMARL) with enhanced model
+Compare convergence of novel algorithms (PerformativeMFMARL / PerformativeMARL: MAPPO + adaptive association)
 vs other RL models (QMIX, IQL, VDN, MADDPG, DeepNashQ) with regular model.
 """
+import json
+import logging
+import os
+import re
+from typing import Any, Dict, Optional
+
 import numpy as np
 import matplotlib.pyplot as plt
 from rl_agent.marl_env import MARLEnv
@@ -14,6 +20,9 @@ from rl_agent.MAPPO import MAPPO
 from rl_agent.AdaptiveNonStationaryMARL import AdaptiveNonStationaryMARL
 import torch
 from tqdm import tqdm
+
+# On-policy PPO variants (optionally with adaptive association and/or extended env)
+MAPPO_FAMILY = frozenset({"MAPPO", "PerformativeMFMARL", "PerformativeMARL"})
 
 
 def compute_moving_average(data, window_size):
@@ -28,56 +37,176 @@ def compute_moving_average(data, window_size):
     return np.array(smoothed)
 
 
-def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_episode=50, 
-                learning_rate=0.001, gamma=0.99, epsilon=0.1, device=None, context_dim=7):
-    """Train a single RL model and return convergence metrics."""
+def _safe_checkpoint_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "agent"
+
+
+def _hp(base: Dict[str, Any], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not overrides:
+        return dict(base)
+    out = dict(base)
+    out.update(overrides)
+    return out
+
+
+def train_model(
+    agent_class,
+    agent_name,
+    env,
+    num_episodes=500,
+    num_steps_per_episode=50,
+    learning_rate=0.001,
+    gamma=0.99,
+    epsilon=0.1,
+    device=None,
+    context_dim=0,
+    checkpoint_every: Optional[int] = None,
+    checkpoint_root: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    hyperparam_overrides: Optional[Dict[str, Any]] = None,
+):
+    """Train a single RL model and return convergence metrics.
+
+    If ``checkpoint_every`` and ``checkpoint_root`` are set, every ``checkpoint_every``
+    episodes saves ``metrics.json`` and ``agent_checkpoint.pt`` (via ``agent.save``)
+    under ``checkpoint_root / {agent_name} / episode_{k}``.
+    """
     
     print(f"\n{'='*70}")
     print(f"Training {agent_name}...")
     print(f"{'='*70}")
     
     num_uavs = env.num_uavs
-    # Dynamically determine state_dim based on environment's observation space
-    state_dim = env.observation_space.shape[0] // num_uavs if env.enable_non_stationary else 3 
+    state_dim = getattr(env, "agent_obs_dim", env.observation_space.shape[0] // num_uavs)
     action_dim = env.action_space.nvec[0]
     
     # Initialize agent based on type
     if agent_name == "AdaptiveNonStationaryMARL":
         global_state_dim = env.observation_space.shape[0]
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           global_state_dim=global_state_dim, context_dim=context_dim,
-                           learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
-                           device=device, buffer_size=10000, batch_size=64, target_update=100)
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                global_state_dim=global_state_dim,
+                context_dim=context_dim,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                epsilon=epsilon,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                target_update=100,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
         # Set the improved association function
         env.set_association_function(agent.get_association_function())
-    elif agent_name == "QMIX":
-        global_state_dim = env.observation_space.shape[0] # Global state is the full observation
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           global_state_dim=global_state_dim, learning_rate=learning_rate,
-                           gamma=gamma, epsilon=epsilon, device=device, buffer_size=10000,
-                           batch_size=64, target_update=100)
+    elif agent_name in MAPPO_FAMILY:
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                learning_rate_actor=0.0003,
+                learning_rate_critic=0.001,
+                gamma=gamma,
+                clip_epsilon=0.2,
+                device=device,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
+        if agent_name in ("PerformativeMFMARL", "PerformativeMARL"):
+            env.set_association_function(AdaptiveNonStationaryMARL.standalone_association_function())
+    elif agent_name.startswith("QMIX"):
+        global_state_dim = env.observation_space.shape[0]  # Global state is the full observation
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                global_state_dim=global_state_dim,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                epsilon=epsilon,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                target_update=100,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     elif agent_name == "IQL":
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
-                           device=device, buffer_size=10000, batch_size=64, target_update=100)
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                epsilon=epsilon,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                target_update=100,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     elif agent_name == "VDN":
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
-                           device=device, buffer_size=10000, batch_size=64, target_update=100)
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                epsilon=epsilon,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                target_update=100,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     elif agent_name == "MADDPG":
-        # MADDPG doesn't need global_state_dim - critic uses state_dim * num_agents internally
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           learning_rate_actor=learning_rate, learning_rate_critic=learning_rate,
-                           gamma=gamma, device=device, buffer_size=10000, batch_size=64, tau=0.01)
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                learning_rate_actor=learning_rate,
+                learning_rate_critic=learning_rate,
+                gamma=gamma,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                tau=0.01,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     elif agent_name == "DeepNashQ":
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
-                           device=device, buffer_size=10000, batch_size=64, target_update=100)
-    elif agent_name == "MAPPO":
-        # MAPPO is on-policy, uses different parameters
-        agent = agent_class(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                           learning_rate_actor=0.0003, learning_rate_critic=0.001,
-                           gamma=gamma, clip_epsilon=0.2, device=device)
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                state_dim=state_dim,
+                action_dim=action_dim,
+                learning_rate=learning_rate,
+                gamma=gamma,
+                epsilon=epsilon,
+                device=device,
+                buffer_size=10000,
+                batch_size=64,
+                target_update=100,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     else:
         raise ValueError(f"Unknown agent: {agent_name}")
     
@@ -85,8 +214,43 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
     episode_throughputs = []
     episode_min_rates = []
     episode_goodness = []
+    episode_energy_efficiencies = []
+    episode_energies_j = []
     print(f"  Running {num_episodes} episodes...")
-    
+    if logger:
+        logger.info("Starting training agent=%s episodes=%d", agent_name, num_episodes)
+
+    def maybe_checkpoint(episode_idx: int) -> None:
+        if not checkpoint_every or not checkpoint_root:
+            return
+        ep = episode_idx + 1
+        if ep % checkpoint_every != 0:
+            return
+        sub = os.path.join(checkpoint_root, _safe_checkpoint_name(agent_name), f"episode_{ep:05d}")
+        os.makedirs(sub, exist_ok=True)
+        metrics_path = os.path.join(sub, "metrics.json")
+        payload = {
+            "agent_name": agent_name,
+            "episode": ep,
+            "rewards": [float(x) for x in episode_rewards],
+            "throughputs": [float(x) for x in episode_throughputs],
+            "goodness": [float(x) for x in episode_goodness],
+            "min_rates": [float(x) for x in episode_min_rates],
+            "energy_efficiencies_mbit_per_j": [float(x) for x in episode_energy_efficiencies],
+            "episode_energies_j": [float(x) for x in episode_energies_j],
+        }
+        with open(metrics_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        ckpt_path = os.path.join(sub, "agent_checkpoint.pt")
+        if hasattr(agent, "save"):
+            try:
+                agent.save(ckpt_path)
+            except Exception as ex:
+                if logger:
+                    logger.warning("Checkpoint save failed for %s: %s", agent_name, ex)
+        if logger:
+            logger.info("Checkpoint agent=%s episode=%d dir=%s", agent_name, ep, sub)
+
     for episode in tqdm(range(num_episodes), desc=f"  {agent_name}", leave=False):
         obs, _ = env.reset()
         done = False
@@ -94,6 +258,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
         episode_throughput = 0.0
         episode_min_rate = float('inf')
         episode_goodness_sum = 0.0
+        episode_energy_j = 0.0
         step_count = 0
         
         obs_tensor = torch.tensor(obs, device=device, dtype=torch.float32)
@@ -116,7 +281,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
                 if agent_name == "AdaptiveNonStationaryMARL":
                     action = agent.get_action(agent_obs, i, global_state=obs_tensor)
                     log_probs.append(0.0)  # Not used for this agent
-                elif agent_name == "MAPPO":
+                elif agent_name in MAPPO_FAMILY:
                     action, log_prob = agent.get_action(agent_obs, i, explore=True)
                     log_probs.append(log_prob)
                 elif agent_name == "MADDPG":
@@ -133,6 +298,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
             
             episode_reward += reward
             episode_throughput += info.get('throughput', 0.0)
+            episode_energy_j += float(info.get('step_energy_j', 0.0))
             step_count += 1
             episode_min_rate = min(episode_min_rate, info.get('min_rate', episode_min_rate))
             episode_goodness_sum += info.get('goodness', 0.0)
@@ -144,7 +310,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
             states = [obs_tensor[i*state_dim:(i+1)*state_dim] for i in range(num_uavs)]
             next_states = [next_obs_tensor[i*state_dim:(i+1)*state_dim] for i in range(num_uavs)]
             
-            if agent_name == "MAPPO":
+            if agent_name in MAPPO_FAMILY:
                 # MAPPO is on-policy - store in trajectory for episode-end update
                 trajectory_states.append(states)
                 trajectory_actions.append(actions)
@@ -159,7 +325,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
                 agent.store_transition(states, actions, [reward] * num_uavs, 
                                      next_states, [done] * num_uavs,
                                      global_state, next_global_state)
-            elif agent_name == "QMIX":
+            elif agent_name.startswith("QMIX"):
                 # QMIX needs global state
                 global_state = obs_tensor
                 next_global_state = next_obs_tensor
@@ -176,7 +342,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
             
             # Update agent (off-policy agents update during episode)
             # MAPPO is on-policy and updates after episode
-            if agent_name != "MAPPO":
+            if agent_name not in MAPPO_FAMILY:
                 if hasattr(agent, 'replay_buffer') and len(agent.replay_buffer) > agent.batch_size and step_count % 2 == 0:
                     agent.update()
             
@@ -184,7 +350,7 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
             obs_tensor = next_obs_tensor
         
         # For MAPPO (on-policy), store full trajectory and update
-        if agent_name == "MAPPO":
+        if agent_name in MAPPO_FAMILY:
             for t in range(len(trajectory_states)):
                 agent.store_transition(
                     trajectory_states[t], trajectory_actions[t], trajectory_rewards[t],
@@ -205,12 +371,21 @@ def train_model(agent_class, agent_name, env, num_episodes=500, num_steps_per_ep
 
         episode_min_rates.append(episode_min_rate)
         episode_goodness.append(episode_goodness_sum / max(1, step_count))
-            
+        # Nominal bits per episode ≈ Σ (rate [bit/s] × 1 s) per step; energy efficiency in Mbit/J.
+        bits_nominal = max(0.0, episode_throughput)
+        ee_mbit_per_j = (bits_nominal / 1e6) / (episode_energy_j + 1e-9)
+        episode_energy_efficiencies.append(ee_mbit_per_j)
+        episode_energies_j.append(episode_energy_j)
+
+        maybe_checkpoint(episode)
+
     return {
         'rewards': episode_rewards,
         'throughputs': episode_throughputs,
         'min_rates': episode_min_rates,
-        'goodness': episode_goodness
+        'goodness': episode_goodness,
+        'energy_efficiencies': episode_energy_efficiencies,
+        'episode_energies_j': episode_energies_j,
     }
 
 
@@ -223,7 +398,7 @@ def plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced,
     window_size = min(100, num_episodes // 10)  # Larger window for better smoothing
     
     colors = {
-        'AdaptiveNonStationaryMARL': 'red',
+        'PerformativeMFMARL': 'red',
         'QMIX': 'blue',
         'IQL': 'green',
         'VDN': 'orange',
@@ -253,14 +428,14 @@ def plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced,
                         alpha=0.15, color=color, zorder=2)
     
     # Plot novel algorithm with enhanced model
-    if 'AdaptiveNonStationaryMARL' in results_novel_enhanced:
-        results = results_novel_enhanced['AdaptiveNonStationaryMARL']
-        color = colors.get('AdaptiveNonStationaryMARL', 'red')
+    if 'PerformativeMFMARL' in results_novel_enhanced:
+        results = results_novel_enhanced['PerformativeMFMARL']
+        color = colors.get('PerformativeMFMARL', 'red')
         # Convert bps to Gbps (divide by 1e9)
         throughputs_gbps = np.array(results['throughputs']) / 1e9
         ax1.plot(episodes, throughputs_gbps, '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
         smoothed = compute_moving_average(throughputs_gbps, window_size)
-        ax1.plot(episodes, smoothed, '--', linewidth=3.5, label='AdaptiveNonStationaryMARL', 
+        ax1.plot(episodes, smoothed, '--', linewidth=3.5, label='PerformativeMFMARL',
                 color=color, zorder=3)
         
         std_window = window_size
@@ -299,12 +474,12 @@ def plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced,
                         alpha=0.15, color=color, zorder=2)
     
     # Plot novel algorithm with enhanced model
-    if 'AdaptiveNonStationaryMARL' in results_novel_enhanced:
-        results = results_novel_enhanced['AdaptiveNonStationaryMARL']
-        color = colors.get('AdaptiveNonStationaryMARL', 'red')
+    if 'PerformativeMFMARL' in results_novel_enhanced:
+        results = results_novel_enhanced['PerformativeMFMARL']
+        color = colors.get('PerformativeMFMARL', 'red')
         ax2.plot(episodes, results['rewards'], '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
         smoothed = compute_moving_average(results['rewards'], window_size)
-        ax2.plot(episodes, smoothed, '--', linewidth=3.5, label='AdaptiveNonStationaryMARL', 
+        ax2.plot(episodes, smoothed, '--', linewidth=3.5, label='PerformativeMFMARL',
                 color=color, zorder=3)
         
         std_window = window_size
@@ -342,7 +517,7 @@ def sweep_ue_density(agent_class, agent_name, device, grid_size,
                      num_uavs=3, user_list=(5,10,15,20,30,40),
                      num_episodes=400, num_steps_per_episode=30,
                      enable_non_stationary=True, enable_performative=True,
-                     learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                     learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=0,
                      last_n=100):
     xs, y_tp, y_minrate = [], [], []
 
@@ -366,7 +541,7 @@ def sweep_threshold(agent_class, agent_name, device, grid_size,
                     threshold_list=(0.2,0.4,0.6,0.8,1.0),  # Mbps
                     num_episodes=400, num_steps_per_episode=30,
                     enable_non_stationary=True, enable_performative=True,
-                    learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                    learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=0,
                     last_n=100):
     xs, y_good = [], []
 
@@ -428,7 +603,7 @@ def sweep_ue_density_multi(agents_dict, device, grid_size,
                            num_uavs=3, user_list=(5,10,15,20,30,40),
                            num_episodes=300, num_steps_per_episode=30,
                            env_flags=None,
-                           learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                           learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=0,
                            last_n=100):
     """
     env_flags = dict(enable_non_stationary=..., enable_performative=..., min_user_rate=...)
@@ -466,7 +641,7 @@ def sweep_threshold_multi(agents_dict, device, grid_size,
                           threshold_list=(0.2,0.4,0.6,0.8,1.0),  # Mbps
                           num_episodes=300, num_steps_per_episode=30,
                           env_flags=None,
-                          learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+                          learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=0,
                           last_n=100):
     env_flags = env_flags or {}
     curves = {}
@@ -550,7 +725,7 @@ def main():
     learning_rate = 0.001
     gamma = 0.99
     epsilon = 0.1
-    context_dim = 7  # For novel algorithm
+    context_dim = 0  # NS context embedded in each agent_obs block
     
     print(f"\nConfiguration:")
     print(f"  - Number of UAVs: {num_uavs}")
@@ -587,15 +762,15 @@ def main():
     
     # Train novel algorithm with enhanced environment
     print(f"\n{'='*70}")
-    print("Training Novel Algorithm (Enhanced Environment: Performative + Non-Stationary)")
+    print("Training Novel Algorithm: PerformativeMFMARL (MAPPO + adaptive association, enhanced env)")
     print(f"{'='*70}")
     env = MARLEnv(num_uavs=num_uavs, num_users=num_users, grid_size=grid_size, device=device,
                  enable_non_stationary=True, enable_performative=True)
-    results = train_model(AdaptiveNonStationaryMARL, "AdaptiveNonStationaryMARL", env, 
+    results = train_model(MAPPO, "PerformativeMFMARL", env,
                          num_episodes=num_episodes, num_steps_per_episode=num_steps_per_episode,
-                         learning_rate=learning_rate, gamma=gamma, epsilon=epsilon, 
+                         learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
                          device=device, context_dim=context_dim)
-    results_novel_enhanced['AdaptiveNonStationaryMARL'] = results
+    results_novel_enhanced['PerformativeMFMARL'] = results
     
     # Create visualizations
     print(f"\n{'='*70}")
@@ -604,8 +779,8 @@ def main():
     plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced, num_episodes)
     # ===================== 3-GRAPH SWEEP EXPERIMENT =====================
 
-    agent_class = AdaptiveNonStationaryMARL
-    agent_name = "AdaptiveNonStationaryMARL"
+    agent_class = MAPPO
+    agent_name = "PerformativeMFMARL"
 
     user_list = [5, 10, 15, 20, 30, 40]
     thr_list_mbps = [0.2, 0.4, 0.6, 0.8, 1.0]
@@ -642,10 +817,10 @@ def main():
         print(f"  {agent_name:25s}: Throughput = {final_tp:.2e}, Reward = {final_rwd:.2f}")
     
     print(f"\nFinal Performance - Novel Algorithm with Enhanced Model (last {last_n} episodes):")
-    if 'AdaptiveNonStationaryMARL' in results_novel_enhanced:
-        final_tp = np.mean(results_novel_enhanced['AdaptiveNonStationaryMARL']['throughputs'][-last_n:])
-        final_rwd = np.mean(results_novel_enhanced['AdaptiveNonStationaryMARL']['rewards'][-last_n:])
-        print(f"  {'AdaptiveNonStationaryMARL':25s}: Throughput = {final_tp:.2e}, Reward = {final_rwd:.2f}")
+    if 'PerformativeMFMARL' in results_novel_enhanced:
+        final_tp = np.mean(results_novel_enhanced['PerformativeMFMARL']['throughputs'][-last_n:])
+        final_rwd = np.mean(results_novel_enhanced['PerformativeMFMARL']['rewards'][-last_n:])
+        print(f"  {'PerformativeMFMARL':25s}: Throughput = {final_tp:.2e}, Reward = {final_rwd:.2f}")
     
     print(f"\n{'='*70}")
     print("✅ RL models convergence comparison complete!")

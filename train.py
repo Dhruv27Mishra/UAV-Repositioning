@@ -41,7 +41,7 @@ def train(num_episodes=1000,
     )
     
     # Get state and action dimensions
-    state_dim = 3  # Each agent observes its own (x,y,z) position
+    state_dim = getattr(env, "agent_obs_dim", 3)
     action_dim = env.action_space.nvec[0]
     
     # Create Deep Nash Q-learning agent
@@ -83,7 +83,7 @@ def train(num_episodes=1000,
             # Get actions for all agents
             actions = []
             for i in range(num_uavs):
-                agent_obs = obs_tensor[i*3:(i+1)*3]  # Get agent's observation
+                agent_obs = obs_tensor[i * state_dim:(i + 1) * state_dim]
                 action = marl.get_action(agent_obs, i)
                 actions.append(action)
             
@@ -95,8 +95,8 @@ def train(num_episodes=1000,
             next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32)
             
             # Store transition in replay buffer
-            states = [obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
-            next_states = [next_obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
+            states = [obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
+            next_states = [next_obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
             marl.store_transition(states, actions, [reward] * num_uavs, next_states, [done] * num_uavs)
             marl.update()
             

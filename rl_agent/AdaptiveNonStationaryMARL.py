@@ -221,21 +221,39 @@ class AdaptiveNonStationaryMARL:
                 cell_size_x, cell_size_y
             )
         return association_func
+
+    @staticmethod
+    def standalone_association_function():
+        """
+        Same UE–UAV association as the adaptive QMIX agent, without instantiating that agent.
+        Use with MAPPO (or other learners) on the performative + signal-map MDP.
+        """
+        def association_func(sinr, rates, distances, is_los_matrix, uav_positions, user_positions,
+                             user_velocities, coverage_heatmap, grid_cells_x, grid_cells_y,
+                             cell_size_x, cell_size_y):
+            return AdaptiveNonStationaryMARL.improved_association_algorithm(
+                sinr, rates, distances, is_los_matrix, uav_positions, user_positions,
+                user_velocities, coverage_heatmap, grid_cells_x, grid_cells_y,
+                cell_size_x, cell_size_y)
+        return association_func
     
     def extract_context(self, global_state: torch.Tensor) -> torch.Tensor:
         """
         Extract non-stationary context from global state.
-        Assumes last context_dim elements of global_state are context features.
+        When context_dim > 0, assumes last context_dim elements of global_state are context features.
+        When context_dim == 0 (context embedded in per-agent state), returns an empty tensor for torch.cat.
         """
+        if self.context_dim == 0:
+            if global_state.dim() == 1:
+                return torch.empty(0, device=global_state.device, dtype=global_state.dtype)
+            return torch.empty(global_state.shape[0], 0, device=global_state.device, dtype=global_state.dtype)
         if global_state.shape[-1] >= self.global_state_dim + self.context_dim:
-            # Extract context (last context_dim elements)
             context = global_state[..., -self.context_dim:]
         else:
-            # No context available, use zeros
-            if len(global_state.shape) == 1:
-                context = torch.zeros(self.context_dim).to(self.device)
+            if global_state.dim() == 1:
+                context = torch.zeros(self.context_dim, device=self.device, dtype=global_state.dtype)
             else:
-                context = torch.zeros(global_state.shape[0], self.context_dim).to(self.device)
+                context = torch.zeros(global_state.shape[0], self.context_dim, device=self.device, dtype=global_state.dtype)
         return context
     
     def get_action(self, state: torch.Tensor, agent_id: int, 
@@ -245,7 +263,10 @@ class AdaptiveNonStationaryMARL:
         if global_state is not None:
             context = self.extract_context(global_state)
         else:
-            context = torch.zeros(self.context_dim).to(self.device)
+            if self.context_dim == 0:
+                context = torch.empty(0, device=self.device)
+            else:
+                context = torch.zeros(self.context_dim, device=self.device)
         
         # Ensure context matches state batch dimension
         if len(state.shape) == 1:

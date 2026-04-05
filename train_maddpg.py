@@ -25,7 +25,7 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
     print(f"Using device: {device}")
     
     env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device)
-    state_dim = 3
+    state_dim = getattr(env, "agent_obs_dim", 3)
     action_dim = env.action_space.nvec[0]
     
     agent = MADDPG(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
@@ -50,7 +50,7 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
         while not done:
             actions = []
             for i in range(num_uavs):
-                agent_obs = obs_tensor[i*3:(i+1)*3]
+                agent_obs = obs_tensor[i * state_dim:(i + 1) * state_dim]
                 action = agent.get_action(agent_obs, i, explore=(episode < num_episodes * 0.8))
                 actions.append(action)
             
@@ -58,8 +58,8 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
             done = terminated or truncated
             next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32)
             
-            states = [obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
-            next_states = [next_obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
+            states = [obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
+            next_states = [next_obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
             agent.store_transition(states, actions, [reward] * num_uavs,
                                   next_states, [done] * num_uavs)
             agent.update()

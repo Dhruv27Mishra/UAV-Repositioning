@@ -21,29 +21,34 @@ This paper introduces a **decentralized MARL framework** to optimize UAV positio
 
 ## 📁 Project Structure
 ```
-├── train.py                    # Deep Nash Q-learning agent
-├── train_iql.py               # Independent Q-Learning
-├── train_qmix.py              # QMIX algorithm
-├── train_vdn.py               # VDN algorithm
-├── train_maddpg.py            # MADDPG algorithm
-├── compare_all_marl.py        # Compare all MARL algorithms
-├── model.py                   # SINR-based deterministic strategy
-├── abid_model.py              # Custom baseline (Deterministic II)
-├── compare_models.py         # Generate performance plots
-├── compare_versions.py        # Compare old vs new (fixed vs variable height)
-├── test_ue_density.py         # UE density performance test
-├── test_performance.py        # Performance validation tests
+├── train.py                         # Deep Nash Q-learning agent
+├── train_iql.py                     # Independent Q-Learning
+├── train_qmix.py                    # QMIX algorithm
+├── train_vdn.py                     # VDN algorithm
+├── train_maddpg.py                  # MADDPG algorithm
+├── train_mappo.py                   # MAPPO
+├── train_adaptive_nonstationary.py  # Adaptive non-stationary MARL (QMIX + association)
+├── compare_all_marl.py              # Compare value-based MARL algorithms
+├── compare_all_rl_convergence.py    # RL convergence comparison (MAPPO family + baselines)
+├── run_rl_comparison_500ep.py       # Full performative MARL benchmark runner
+├── make_final_figures.py            # Build publication PNGs from saved rl_results.json
+├── replot_from_checkpoints.py       # Rebuild curves from checkpoint metrics.json
+├── publication_marl_plots.py      # Publication-style convergence figures
+├── compare_versions.py              # Compare old vs new (fixed vs variable height)
+├── test_performance.py              # Performance validation tests
+├── PERFORMATIVE_MARL.md             # PerformativeMFMARL / PerformativeMARL MDP notes
+├── README_MF_SIGNAL_MAP_MARL.md     # Signal map + occupancy observation details
 ├── rl_agent/
-│   ├── marl_env.py            # MARL environment with variable height
-│   ├── IQL.py                 # Independent Q-Learning
-│   ├── VDN.py                 # Value Decomposition Networks
-│   ├── QMIX.py                # QMIX algorithm
-│   ├── DeepNashQ.py           # Deep Nash Q-learning
-│   └── MADDPG.py              # Multi-Agent DDPG
-├── results/                   # Raw data and plot images (.npy, .png)
-├── requirements.txt           # Python dependencies
+│   ├── marl_env.py                  # MARL environment (performative, signal map, energy metrics)
+│   ├── MAPPO.py
+│   ├── IQL.py, VDN.py, QMIX.py, DeepNashQ.py, MADDPG.py
+│   └── AdaptiveNonStationaryMARL.py
+├── final_figures/                   # Checked-in publication plots (regenerate via make_final_figures.py)
+├── requirements.txt
 ├── LICENSE, Makefile, .gitignore
 ```
+
+Large run artifacts (`figures/`, `cache_runs/`, `models/`, `results/`, logs, checkpoints) are **not** committed; reproduce them with the training scripts above.
 
 
 ---
@@ -91,8 +96,13 @@ We aim to:
 
 ## 🖼️ Visual Results
 
-### Learning Curves and Performance Summary
-![Results](comparison_results.png)
+### Learning curves (publication-style)
+
+Example convergence figures from a full benchmark run are committed under `final_figures/` (e.g. `final_figures/convergence_combined.png`). Regenerate from a saved aggregate JSON:
+
+```bash
+MPLBACKEND=Agg python3 make_final_figures.py --results path/to/rl_results.json --out-dir final_figures
+```
 
 ---
 

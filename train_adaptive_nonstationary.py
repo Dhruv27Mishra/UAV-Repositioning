@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 
 def train(num_episodes=1000, num_uavs=3, num_users=20, grid_size=(10, 10, 5),
-          learning_rate=0.001, gamma=0.99, epsilon=0.1, context_dim=7,
+          learning_rate=0.001, gamma=0.99, epsilon=0.1,
           save_interval=50, device=None):
     """Train AdaptiveNonStationaryMARL with improved association algorithm."""
     device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,9 +21,11 @@ def train(num_episodes=1000, num_uavs=3, num_users=20, grid_size=(10, 10, 5),
     env = MARLEnv(num_uavs=num_uavs, num_users=num_users, grid_size=grid_size, device=device,
                  enable_non_stationary=True, enable_performative=True)
     
-    state_dim = env.observation_space.shape[0] // num_uavs if env.enable_non_stationary else 3
+    state_dim = getattr(env, "agent_obs_dim", env.observation_space.shape[0] // num_uavs)
     action_dim = env.action_space.nvec[0]
     global_state_dim = env.observation_space.shape[0]
+    # NS context is replicated inside each agent observation block; mixing uses full global obs only
+    context_dim = 0
     
     # Create novel algorithm
     agent = AdaptiveNonStationaryMARL(

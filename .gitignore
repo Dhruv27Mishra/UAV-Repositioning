@@ -1,28 +1,44 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual environment
+*.py[cod]
+*$py.class
+.Python
 venv/
+.env
+.venv/
 
-# Model checkpoints (optional, comment out if you want to track models)
+# Training / experiment outputs (regenerate with scripts)
+figures/
+cache_runs/
 models/
+results/
+*.log
+**/checkpoints/
+rl_results*.json
+*_replot.json
+replot_from_checkpoints_meta.json
+summary_last_window.json
 
-# Installer files
-*.deb
+# IDE (local only)
+.vscode/
 
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# Generated test images
+# Images: keep publication outputs only
 *.png
+!final_figures/*.png
+
+# Legacy single-file exception (if present)
 !comparison_results.png
 
-# Test results
+# OS / misc
+.DS_Store
+*.deb
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Legacy test plot names (generated)
 test_*.png
 ue_density_*.png
 version_comparison.png
 height_analysis.png
-marl_comparison_all.png 
+marl_comparison_all.png

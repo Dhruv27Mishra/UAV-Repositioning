@@ -24,10 +24,11 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device)
-    state_dim = 3
+    env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device,
+                 enable_non_stationary=True, enable_performative=True)
+    state_dim = getattr(env, "agent_obs_dim", env.observation_space.shape[0] // num_uavs)
     action_dim = env.action_space.nvec[0]
-    global_state_dim = state_dim * num_uavs
+    global_state_dim = env.observation_space.shape[0]
     
     agent = QMIX(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
                  global_state_dim=global_state_dim, learning_rate=learning_rate,
@@ -51,7 +52,7 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
         while not done:
             actions = []
             for i in range(num_uavs):
-                agent_obs = obs_tensor[i*3:(i+1)*3]
+                agent_obs = obs_tensor[i * state_dim:(i + 1) * state_dim]
                 action = agent.get_action(agent_obs, i)
                 actions.append(action)
             
@@ -59,8 +60,8 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
             done = terminated or truncated
             next_obs_tensor = torch.tensor(next_obs, device=device, dtype=torch.float32)
             
-            states = [obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
-            next_states = [next_obs_tensor[i*3:(i+1)*3] for i in range(num_uavs)]
+            states = [obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
+            next_states = [next_obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
             global_state = obs_tensor.flatten()
             next_global_state = next_obs_tensor.flatten()
             
@@ -78,6 +79,8 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
                 total_collisions += 1
             episode_throughput += info['throughput']
             total_throughput += info['throughput']
+        
+        env.end_episode()
         
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',

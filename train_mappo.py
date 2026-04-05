@@ -27,7 +27,7 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
     
     env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device,
                  enable_non_stationary=True, enable_performative=True)
-    state_dim = env.observation_space.shape[0] // num_uavs if env.enable_non_stationary else 3
+    state_dim = getattr(env, "agent_obs_dim", env.observation_space.shape[0] // num_uavs)
     action_dim = env.action_space.nvec[0]
     
     agent = MAPPO(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,

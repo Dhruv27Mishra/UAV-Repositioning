@@ -52,7 +52,7 @@ class TrainConfig:
     learning_rate: float = 1e-3
     gamma: float = 0.99
     epsilon: float = 0.1
-    context_dim: int = 7
+    context_dim: int = 0
 
     last_n: int = 200  # last-N averaging for plotted point
 
@@ -590,7 +590,7 @@ def main():
         learning_rate=1e-3,
         gamma=0.99,
         epsilon=0.1,
-        context_dim=7,
+        context_dim=0,
         last_n=200,
         enable_non_stationary=True,
         enable_performative=True,

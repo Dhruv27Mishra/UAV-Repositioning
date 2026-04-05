@@ -16,8 +16,14 @@ Non-Stationary RL Features:
 Performative RL Features:
     - Coverage heatmap tracks spatial coverage quality
     - UE distribution weights adapt based on historical coverage
+    - Optional policy-induced occupancy (UAV visitation grid) blended into UE placement updates
     - Creates feedback loop: policy affects UE distribution, which affects future policy
     - Call end_episode() after each episode to update performative parameters
+
+Signal-map observations (optional):
+    - Per-cell aggregated best-server received power (UE locations not in obs)
+    - Each agent's block: pose_i + flat(map) + replicated non-stationary context
+    - Use env.agent_obs_dim for slicing; optional reward terms: handovers, movement, spread
 """
 import numpy as np
 import gymnasium as gym
@@ -36,7 +42,14 @@ class MARLEnv(gym.Env):
                  qos_bonus: float = 10.0,
                  ue_height_range: Tuple[float, float] = (0.0, 5.0),
                  enable_non_stationary: bool = False,
-                 enable_performative: bool = False):
+                 enable_performative: bool = False,
+                 enable_signal_map_obs: bool = True,
+                 handover_penalty: float = 0.0,
+                 movement_penalty: float = 0.0,
+                 spread_bonus: float = 0.0,
+                 use_occupancy_performative: bool = False,
+                 enable_occupancy_obs: bool = False,
+                 occupancy_performative_weight: float = 0.35):
         super(MARLEnv, self).__init__()
         self.num_uavs = num_uavs
         self.num_users = num_users
@@ -50,6 +63,17 @@ class MARLEnv(gym.Env):
         # Non-Stationary and Performative RL flags
         self.enable_non_stationary = enable_non_stationary
         self.enable_performative = enable_performative
+        self.enable_signal_map_obs = enable_signal_map_obs
+        self.handover_penalty = handover_penalty
+        self.movement_penalty = movement_penalty
+        self.spread_bonus = spread_bonus
+        self.use_occupancy_performative = bool(
+            use_occupancy_performative and enable_performative
+        )
+        self.enable_occupancy_obs = bool(enable_occupancy_obs)
+        self.occupancy_performative_weight = float(
+            np.clip(occupancy_performative_weight, 0.0, 1.0)
+        )
         self.episode_count = 0  # Track episodes for non-stationary drift
         self.step_count = 0  # Track steps for gradual changes
         
@@ -64,6 +88,7 @@ class MARLEnv(gym.Env):
         self.performative_update_rate = 0.1  # How fast UE distribution adapts to coverage
         self.coverage_history_window = 50  # Episodes to average for coverage map
         self.coverage_history = []  # Store recent coverage maps
+        self.occupancy_history: List[np.ndarray] = []  # UAV visitation grids (same window as coverage)
         
         # Initialize coverage heatmap (grid cells for spatial tracking)
         self.grid_cells_x = 10  # Number of grid cells in x direction
@@ -77,20 +102,37 @@ class MARLEnv(gym.Env):
         # Define action space (6 possible movements: up, down, left, right, forward, backward)
         self.action_space = spaces.MultiDiscrete([6] * num_uavs)
         
-        # Define observation space (x, y, z coordinates for each UAV)
-        # Note: z (height) can now vary in expanded range [5, 50] meters
-        obs_dim = 3 * num_uavs  # Base: position per UAV
-        if enable_non_stationary:
-            obs_dim += 4  # Context features: episode_norm, traffic_demand, sin, cos
-        # Add UE mobility context for non-stationarity (Type a)
-        if enable_non_stationary:
-            obs_dim += 3  # Average UE mobility rate, direction variance, mobility concentration
-        
-        self.observation_space = spaces.Box(
-            low=np.array([0, 0, 5] * num_uavs + ([-np.inf] * (7 if enable_non_stationary else 0))),
-            high=np.array([grid_size[0], grid_size[1], 50] * num_uavs + ([np.inf] * (7 if enable_non_stationary else 0))),
-            dtype=np.float32
+        self._signal_map_size = self.grid_cells_x * self.grid_cells_y
+        # Per-agent block: [x,y,z] + optional flat signal map + optional occupancy map + optional NS context (7)
+        self._ns_context_dim = 7 if enable_non_stationary else 0
+        self._signal_flat_dim = self._signal_map_size if enable_signal_map_obs else 0
+        self._occupancy_flat_dim = self._signal_map_size if self.enable_occupancy_obs else 0
+        self.agent_obs_dim = (
+            3 + self._signal_flat_dim + self._occupancy_flat_dim + self._ns_context_dim
         )
+        self.total_obs_dim = self.agent_obs_dim * num_uavs
+        
+        low_per_agent = (
+            [0.0, 0.0, 5.0]
+            + [0.0] * self._signal_flat_dim
+            + [0.0] * self._occupancy_flat_dim
+            + [-np.inf] * self._ns_context_dim
+        )
+        high_per_agent = (
+            [float(grid_size[0]), float(grid_size[1]), 50.0]
+            + [1.0] * self._signal_flat_dim
+            + [1.0] * self._occupancy_flat_dim
+            + [np.inf] * self._ns_context_dim
+        )
+        low = np.array(low_per_agent * num_uavs, dtype=np.float32)
+        high = np.array(high_per_agent * num_uavs, dtype=np.float32)
+        
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+        
+        self._last_signal_map_flat = np.zeros(self._signal_map_size, dtype=np.float32)
+        self._last_occupancy_flat = np.zeros(self._signal_map_size, dtype=np.float32)
+        self.prev_association = None
+        self._step_total_displacement = 0.0
         
         # Initialize UAV positions
         self.uav_positions = None
@@ -126,6 +168,12 @@ class MARLEnv(gym.Env):
         self.noise_figure = 9  # in dB
         self.noise_power_dbm = -174 + 10 * np.log10(self.bandwidth) + self.noise_figure
         self.transmit_power_dbm = 30  # 1 Watt
+        # Nominal per-slot energy (J): hover + downlink TX + propulsion ∝ UAV displacement (m).
+        # Used for episode energy-efficiency metrics (Mbit/J); slots assumed 1 s for rate→bit accounting.
+        self._nominal_slot_duration_s = 1.0
+        self._hover_power_per_uav_w = 72.0
+        self._propulsion_j_per_m = 6.0
+        self._p_tx_watt = float(10 ** (self.transmit_power_dbm / 10.0) / 1000.0)
         
         # Maximum steps per episode
         self.max_steps = 50
@@ -242,6 +290,11 @@ class MARLEnv(gym.Env):
         # Initialize target positions (for potential trajectory planning)
         self.target_positions = self.uav_positions.copy()
         
+        self.prev_association = None
+        self._step_total_displacement = 0.0
+        self._last_signal_map_flat = np.zeros(self._signal_map_size, dtype=np.float32)
+        self._last_occupancy_flat = np.zeros(self._signal_map_size, dtype=np.float32)
+        
         # Optional plotting setup
         if self.enable_plotting:
             self._setup_plot()
@@ -291,37 +344,46 @@ class MARLEnv(gym.Env):
         plt.draw()
         plt.pause(0.01)
 
+    def _get_non_stationary_context_list(self) -> List[float]:
+        """Seven global non-stationary scalars (replicated in each agent's observation block)."""
+        if not self.enable_non_stationary:
+            return []
+        ctx = [
+            self.episode_count / 1000.0,
+            float(self.base_traffic_demand),
+            float(np.sin(self.episode_count * 2 * np.pi / 100.0)),
+            float(np.cos(self.episode_count * 2 * np.pi / 100.0)),
+        ]
+        if len(self.ue_mobility_history) > 1:
+            avg_mobility = float(np.mean(self.ue_mobility_rates)) if self.ue_mobility_rates is not None else 0.0
+            direction_variance = float(np.var(self.ue_direction_vectors)) if self.ue_direction_vectors is not None else 0.0
+            mobile_ues = int(np.sum(self.ue_mobility_rates > 5.0)) if self.ue_mobility_rates is not None else 0
+            mobility_concentration = mobile_ues / max(self.num_users, 1.0)
+        else:
+            avg_mobility = 0.0
+            direction_variance = 0.0
+            mobility_concentration = 0.0
+        ctx.extend([
+            avg_mobility / 30.0,
+            direction_variance,
+            mobility_concentration,
+        ])
+        return ctx
+
     def _get_obs(self) -> np.ndarray:
-        """Get the observation (UAV positions + optional non-stationary context)."""
-        obs = []
+        """
+        Per-UAV observation blocks: [pose_i, flat(signal_map), non_stationary_context].
+        UE locations are not included; signal map is aggregated received power per cell.
+        """
+        obs: List[float] = []
+        sig = self._last_signal_map_flat.tolist() if self.enable_signal_map_obs else []
+        occ = self._last_occupancy_flat.tolist() if self.enable_occupancy_obs else []
+        ctx = self._get_non_stationary_context_list()
         for i in range(self.num_uavs):
-            obs.extend(self.uav_positions[i])
-        
-        if self.enable_non_stationary:
-            # Add context features: normalized episode count, traffic demand, sin/cos of episode for periodicity
-            obs.append(self.episode_count / 1000.0)  # Normalize episode count
-            obs.append(self.base_traffic_demand)
-            obs.append(np.sin(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
-            obs.append(np.cos(self.episode_count * 2 * np.pi / 100.0))  # Example: 100-episode cycle
-            
-            # Add UE mobility non-stationarity context (Type a)
-            if len(self.ue_mobility_history) > 1:
-                # Calculate average mobility rate
-                avg_mobility = np.mean(self.ue_mobility_rates) if self.ue_mobility_rates is not None else 0.0
-                # Calculate direction variance (how spread out UE movements are)
-                direction_variance = np.var(self.ue_direction_vectors) if self.ue_direction_vectors is not None else 0.0
-                # Calculate mobility concentration (how clustered mobile UEs are)
-                mobile_ues = np.sum(self.ue_mobility_rates > 5.0) if self.ue_mobility_rates is not None else 0
-                mobility_concentration = mobile_ues / max(self.num_users, 1.0)
-            else:
-                avg_mobility = 0.0
-                direction_variance = 0.0
-                mobility_concentration = 0.0
-            
-            obs.append(avg_mobility / 30.0)  # Normalize by max velocity
-            obs.append(direction_variance)
-            obs.append(mobility_concentration)
-        
+            obs.extend(self.uav_positions[i].tolist())
+            obs.extend(sig)
+            obs.extend(occ)
+            obs.extend(ctx)
         return np.array(obs, dtype=np.float32)
 
     def step(self, actions: List[int]):
@@ -331,6 +393,8 @@ class MARLEnv(gym.Env):
         """
         self.current_step += 1
         self.step_count += 1
+        
+        pos_before = self.uav_positions.copy()
         
         # Apply actions to UAV positions
         for i, action in enumerate(actions):
@@ -352,6 +416,10 @@ class MARLEnv(gym.Env):
         self.uav_positions[:, 1] = np.clip(self.uav_positions[:, 1], 0, self.grid_size[1])
         self.uav_positions[:, 2] = np.clip(self.uav_positions[:, 2], 5, 50)
         
+        self._step_total_displacement = float(
+            np.sum(np.linalg.norm(self.uav_positions - pos_before, axis=1))
+        )
+        
         # Move users (for velocity considerations)
         self._move_users()
         
@@ -361,6 +429,8 @@ class MARLEnv(gym.Env):
         # Update coverage heatmap for performative RL
         if self.enable_performative and 'user_rates' in info:
             self._update_coverage_heatmap(info['user_rates'])
+        
+        self._update_uav_occupancy_maps()
         
         # Check if episode is done
         done = self.current_step >= self.max_steps
@@ -415,6 +485,38 @@ class MARLEnv(gym.Env):
         else:
             # Default: simple SNR-based association
             best_uav_indices = np.argmax(sinr, axis=0)
+        
+        if self.prev_association is None or self.prev_association.shape != best_uav_indices.shape:
+            handovers = 0
+        else:
+            handovers = int(np.sum(self.prev_association != best_uav_indices))
+        self.prev_association = best_uav_indices.copy()
+        
+        if self.enable_signal_map_obs:
+            rx_power = tx_power_linear * gains_linear[best_uav_indices, np.arange(self.num_users)]
+            cell_best = np.zeros((self.grid_cells_x, self.grid_cells_y), dtype=np.float32)
+            for j in range(self.num_users):
+                xg = int(self.user_positions[j, 0] / self.cell_size_x)
+                yg = int(self.user_positions[j, 1] / self.cell_size_y)
+                if 0 <= xg < self.grid_cells_x and 0 <= yg < self.grid_cells_y:
+                    cell_best[xg, yg] = max(float(cell_best[xg, yg]), float(rx_power[j]))
+            mx = float(np.max(cell_best))
+            if mx > 1e-30:
+                cell_best /= mx
+            self._last_signal_map_flat = cell_best.flatten()
+        else:
+            self._last_signal_map_flat = np.zeros(self._signal_map_size, dtype=np.float32)
+        
+        if self.num_uavs >= 2:
+            xy = self.uav_positions[:, :2]
+            pair_d = []
+            for i in range(self.num_uavs):
+                for j in range(i + 1, self.num_uavs):
+                    pair_d.append(float(np.linalg.norm(xy[i] - xy[j])))
+            mean_uav_ground_dist = float(np.mean(pair_d))
+        else:
+            mean_uav_ground_dist = 0.0
+        
         uav_user_rates = [[] for _ in range(self.num_uavs)]
         
         for j in range(self.num_users):
@@ -468,6 +570,16 @@ class MARLEnv(gym.Env):
         if collisions:
             reward += self.collision_penalty
         
+        reward -= self.handover_penalty * handovers
+        reward -= self.movement_penalty * self._step_total_displacement
+        reward += self.spread_bonus * mean_uav_ground_dist
+        
+        dt = self._nominal_slot_duration_s
+        e_comm = self.num_uavs * self._p_tx_watt * dt
+        e_hover = self.num_uavs * self._hover_power_per_uav_w * dt
+        e_prop = self._propulsion_j_per_m * self._step_total_displacement
+        step_energy_j = float(e_comm + e_hover + e_prop)
+        
         info = {
             'throughput': float(total_throughput),
             'fairness': float(fairness),
@@ -481,7 +593,11 @@ class MARLEnv(gym.Env):
             'min_rate': float(min_rate),         # bps
             'qos_ratio': float(qos_ratio),        # 0..1
             'goodness': float(goodness),
-            'heights': heights
+            'heights': heights,
+            'handovers': handovers,
+            'total_movement': float(self._step_total_displacement),
+            'mean_uav_distance': mean_uav_ground_dist,
+            'step_energy_j': step_energy_j,
         }
         
         return float(reward), info
@@ -585,6 +701,30 @@ class MARLEnv(gym.Env):
         
         return positions
     
+    def _uav_cell_occupancy_counts(self) -> np.ndarray:
+        """Per-cell counts of UAVs (ground projection); policy-induced spatial occupancy."""
+        occ = np.zeros((self.grid_cells_x, self.grid_cells_y), dtype=np.float64)
+        for i in range(self.num_uavs):
+            xg = int(self.uav_positions[i, 0] / self.cell_size_x)
+            yg = int(self.uav_positions[i, 1] / self.cell_size_y)
+            if 0 <= xg < self.grid_cells_x and 0 <= yg < self.grid_cells_y:
+                occ[xg, yg] += 1.0
+        return occ
+
+    def _update_uav_occupancy_maps(self) -> None:
+        """Track UAV visitation for optional observations and performative UE placement."""
+        occ = self._uav_cell_occupancy_counts()
+        if self.enable_occupancy_obs:
+            flat = occ.astype(np.float32).flatten()
+            mx = float(np.max(flat))
+            if mx > 1e-9:
+                flat = flat / mx
+            self._last_occupancy_flat = flat
+        if self.use_occupancy_performative:
+            self.occupancy_history.append(occ.copy())
+            if len(self.occupancy_history) > self.coverage_history_window:
+                self.occupancy_history.pop(0)
+
     def _update_coverage_heatmap(self, user_rates: np.ndarray):
         """Update the coverage heatmap based on current user rates."""
         if not self.enable_performative:
@@ -620,18 +760,27 @@ class MARLEnv(gym.Env):
         # Normalize to get a probability distribution
         normalized_coverage = avg_coverage / (np.sum(avg_coverage) + 1e-9)
         
+        target = normalized_coverage
+        if self.use_occupancy_performative and self.occupancy_history:
+            avg_occ = np.mean(self.occupancy_history, axis=0)
+            normalized_occ = avg_occ / (np.sum(avg_occ) + 1e-9)
+            w = self.occupancy_performative_weight
+            target = (1.0 - w) * normalized_coverage + w * normalized_occ
+        
         # Update distribution weights gradually
         if self.ue_distribution_weights is None:
-            self.ue_distribution_weights = normalized_coverage.copy()
+            self.ue_distribution_weights = target.copy()
         else:
             self.ue_distribution_weights = (
                 (1 - self.performative_update_rate) * self.ue_distribution_weights +
-                self.performative_update_rate * normalized_coverage
+                self.performative_update_rate * target
             )
         
         # Add some exploration to avoid complete concentration
         exploration_weight = 0.1
-        uniform_dist = np.ones_like(normalized_coverage) / (self.grid_cells_x * self.grid_cells_y)
+        uniform_dist = np.ones_like(self.ue_distribution_weights) / (
+            self.grid_cells_x * self.grid_cells_y
+        )
         self.ue_distribution_weights = (
             (1 - exploration_weight) * self.ue_distribution_weights +
             exploration_weight * uniform_dist
@@ -646,6 +795,7 @@ class MARLEnv(gym.Env):
             # Clear history for next averaging window periodically
             if self.episode_count % self.coverage_history_window == 0:
                 self.coverage_history = []
+                self.occupancy_history = []
     
     def close(self):
         """Close the environment."""
