@@ -12,10 +12,10 @@ install:
 	python3 -m venv venv
 	. venv/bin/activate && pip install -r requirements.txt
 
-# Run training
+# Run training (Deep Nash Q entry script)
 train:
 	@echo "Starting training..."
-	. venv/bin/activate && $(PYTHON) train.py
+	. venv/bin/activate && $(PYTHON) scripts/train.py
 
 # Clean up generated files
 clean:

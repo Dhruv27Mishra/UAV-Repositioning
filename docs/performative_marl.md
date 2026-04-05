@@ -2,9 +2,9 @@
 
 This note documents the two **MAPPO-based** proposed methods used in the performative multi-UAV experiments (formerly referred to as *AdaptiveMAPPO* and *AdaptiveMAPPO_NoMF*). Both share the same **action space**, **team reward**, and **training loop**; they differ only in **which spatial fields are included in each agent’s observation** and in how the **mean-field–style** side information is presented to the policy.
 
-Implementation lives in `rl_agent/marl_env.py` (MDP), `rl_agent/MAPPO.py` (learner), `rl_agent/AdaptiveNonStationaryMARL.py` (`standalone_association_function` injected into the env), `compare_all_rl_convergence.py` (`train_model`), and `run_rl_comparison_500ep.py` (full baseline comparison).
+Implementation lives in `rl_agent/marl_env.py` (MDP), `rl_agent/MAPPO.py` (learner), `rl_agent/AdaptiveNonStationaryMARL.py` (`standalone_association_function` injected into the env), `scripts/compare_all_rl_convergence.py` (`train_model`), and `scripts/run_rl_comparison_500ep.py` (full baseline comparison).
 
-**Note:** `compare_all_rl_convergence.py`’s `main()` trains **PerformativeMFMARL** only as a quick demo; the **two-variant** study (PerformativeMFMARL vs PerformativeMARL) is in `run_rl_comparison_500ep.py`.
+**Note:** `scripts/compare_all_rl_convergence.py`’s `main()` trains **PerformativeMFMARL** only as a quick demo; the **two-variant** study (PerformativeMFMARL vs PerformativeMARL) is in `scripts/run_rl_comparison_500ep.py`.
 
 ---
 
@@ -14,7 +14,7 @@ Implementation lives in `rl_agent/marl_env.py` (MDP), `rl_agent/MAPPO.py` (learn
 2. **Non-stationary context** — Optional drift in traffic demand and channel-related parameters; seven global scalars replicated in every agent’s observation block when enabled.
 3. **Signal-map observations** — A low-dimensional **per-cell** map of best-server received power (normalized), without exposing raw UE coordinates (mean-field style shared field).
 4. **Occupancy map observations (PerformativeMFMARL only in the 500-ep runner)** — Normalized per-cell UAV visitation, appended to each agent block when enabled.
-5. **Reward shaping** (proposed runs in `run_rl_comparison_500ep.py`) — Handover penalty, movement penalty, and spread bonus on top of throughput and QoS.
+5. **Reward shaping** (proposed runs in `scripts/run_rl_comparison_500ep.py`) — Handover penalty, movement penalty, and spread bonus on top of throughput and QoS.
 6. **Adaptive UE–UAV association** — Both proposed methods register `AdaptiveNonStationaryMARL.standalone_association_function()` so the env uses a rule-based association that considers SINR, performative heatmap, mobility, LoS, and load (instead of pure argmax-SINR).
 
 ---
@@ -47,7 +47,7 @@ Per-UAV block layout:
 
 `observation_space.shape[0] = num_uavs * agent_obs_dim`.
 
-**PerformativeMFMARL** (in `run_rl_comparison_500ep.py`): non-stationary + performative + **signal map on** + **occupancy obs on** + **occupancy blended into performative UE updates** + shaped reward.
+**PerformativeMFMARL** (in `scripts/run_rl_comparison_500ep.py`): non-stationary + performative + **signal map on** + **occupancy obs on** + **occupancy blended into performative UE updates** + shaped reward.
 
 **PerformativeMARL** (ablation): same as above except **`enable_signal_map_obs=False`** and **`enable_occupancy_obs=False`**, so each block is **pose + NS context only** (smaller `agent_obs_dim`). Performative dynamics and association rule are unchanged; the policy no longer sees the shared radio / occupancy fields.
 
@@ -92,20 +92,20 @@ flowchart TD
   K --> A
 ```
 
-**Training:** `train_model` in `compare_all_rl_convergence.py` rolls out episodes, accumulates per-episode throughput / return / goodness / energy metrics, and calls `env.end_episode()` where performative mode is enabled. For MAPPO-family agents named `PerformativeMFMARL` or `PerformativeMARL`, the env’s association function is set from `AdaptiveNonStationaryMARL.standalone_association_function()`.
+**Training:** `train_model` in `scripts/compare_all_rl_convergence.py` rolls out episodes, accumulates per-episode throughput / return / goodness / energy metrics, and calls `env.end_episode()` where performative mode is enabled. For MAPPO-family agents named `PerformativeMFMARL` or `PerformativeMARL`, the env’s association function is set from `AdaptiveNonStationaryMARL.standalone_association_function()`.
 
 ---
 
 ## Naming and legacy artifacts
 
 - Code and new result files use **`PerformativeMFMARL`** and **`PerformativeMARL`**.
-- Older runs may still store **`AdaptiveMAPPO`** / **`AdaptiveMAPPO_NoMF`** in `rl_results.json` or under `checkpoints/AdaptiveMAPPO*/`. Plotting helpers (`make_final_figures.py`, `replot_from_checkpoints.py`) map those legacy keys to the new names so figures stay consistent without retraining.
+- Older runs may still store **`AdaptiveMAPPO`** / **`AdaptiveMAPPO_NoMF`** in `rl_results.json` or under `checkpoints/AdaptiveMAPPO*/`. Plotting helpers (`scripts/make_final_figures.py`, `scripts/replot_from_checkpoints.py`) map those legacy keys to the new names so figures stay consistent without retraining.
 
 ---
 
 ## Quick reference: where each variant is built
 
-| Variant | Typical flags (`run_rl_comparison_500ep.py`) |
+| Variant | Typical flags (`scripts/run_rl_comparison_500ep.py`) |
 |---------|-----------------------------------------------|
 | **PerformativeMFMARL** | `shaped=True`, `use_occupancy_performative=True`, `enable_occupancy_obs=True`, `enable_signal_map_obs=True` |
 | **PerformativeMARL** | Same, but `enable_occupancy_obs=False`, `enable_signal_map_obs=False` |
@@ -113,7 +113,8 @@ flowchart TD
 Regenerate publication-style PNGs from a saved aggregate JSON:
 
 ```bash
-MPLBACKEND=Agg python3 make_final_figures.py \
-  --results figures/convergence_2000ep_pub_tuned/rl_results.json \
-  --out-dir final_figures
+# From repository root; pass the aggregate JSON from your run under outputs/
+MPLBACKEND=Agg python3 scripts/make_final_figures.py \
+  --results outputs/ep2000/rl_results.json \
+  --out-dir assets/figures
 ```

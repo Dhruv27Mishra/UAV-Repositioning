@@ -7,6 +7,8 @@ Use ``--publication`` for print-ready PNG (serif fonts, colorblind-safe colors).
 """
 from __future__ import annotations
 
+import repo_paths  # noqa: F401
+
 import argparse
 import json
 import logging
@@ -242,7 +244,12 @@ def main() -> None:
     p.add_argument("--num-uavs", type=int, default=3)
     p.add_argument("--num-users", type=int, default=20)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out-dir", type=str, default="figures")
+    p.add_argument(
+        "--out-dir",
+        type=str,
+        default="outputs",
+        help="Base directory for run logs, rl_results.json, and checkpoints (default: outputs).",
+    )
     p.add_argument(
         "--tag",
         type=str,

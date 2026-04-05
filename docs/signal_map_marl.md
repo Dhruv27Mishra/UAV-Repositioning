@@ -1,6 +1,6 @@
 # Mean-field style performative MARL with signal-map observations
 
-This document describes the **enhanced UAV coordination MDP** used for fair comparison across algorithms, and the proposed **PerformativeMFMARL** / **PerformativeMARL** MAPPO variants (see also `PERFORMATIVE_MARL.md` for a dedicated overview of those two methods).
+This document describes the **enhanced UAV coordination MDP** used for fair comparison across algorithms, and the proposed **PerformativeMFMARL** / **PerformativeMARL** MAPPO variants (see also [`docs/performative_marl.md`](performative_marl.md) for a dedicated overview of those two methods).
 
 ## High-level flow
 
@@ -38,7 +38,7 @@ Enable flags on `MARLEnv`:
 - `enable_non_stationary` — include drift + mobility context (comparison runs use `True`).
 - `enable_performative` — UE spawn distribution tracks historical coverage (`True` in comparison runs).
 - `use_occupancy_performative` — blend **UAV visitation** (grid occupancy) with coverage when updating UE placement (PerformativeMFMARL comparison env).
-- `enable_occupancy_obs` — append a normalized per-cell UAV-count map to each agent block (**PerformativeMFMARL** only in `run_rl_comparison_500ep.py`; **PerformativeMARL** turns this off).
+- `enable_occupancy_obs` — append a normalized per-cell UAV-count map to each agent block (**PerformativeMFMARL** only in `scripts/run_rl_comparison_500ep.py`; **PerformativeMARL** turns this off).
 
 ---
 
@@ -77,7 +77,7 @@ Thus the **data distribution** depends on **long-run policy-induced coverage** a
 
 ---
 
-## Proposed variant (in `run_rl_comparison_500ep.py`)
+## Proposed variant (in `scripts/run_rl_comparison_500ep.py`)
 
 Baselines share the **same** performative + non-stationary + **signal-map** MDP (no extra occupancy block, no reward shaping). **PerformativeMFMARL** uses **MAPPO** with:
 
@@ -89,7 +89,7 @@ Baselines share the **same** performative + non-stationary + **signal-map** MDP 
 
 **Baselines**: **QMIX**, **IQL**, **VDN**, **MADDPG**, **DeepNashQ**, **MAPPO** (default shaping weights = 0, no occupancy obs / occupancy performative).
 
-**Note:** `train_adaptive_nonstationary.py` still trains the original **AdaptiveNonStationaryMARL** (QMIX + adaptive association) if you want that baseline for ablations.
+**Note:** `scripts/train_adaptive_nonstationary.py` still trains the original **AdaptiveNonStationaryMARL** (QMIX + adaptive association) if you want that baseline for ablations.
 
 ---
 
@@ -98,24 +98,24 @@ Baselines share the **same** performative + non-stationary + **signal-map** MDP 
 From the repository root:
 
 ```bash
-python3 run_rl_comparison_500ep.py --episodes 500 --steps-per-episode 30
+python3 scripts/run_rl_comparison_500ep.py --episodes 500 --steps-per-episode 30
 ```
 
-Long runs can be started in the background and tailed, for example:
+By default, artifacts go under `outputs/<tag>/` (gitignored). Long runs can be started in the background and tailed, for example:
 
 ```bash
-nohup python3 run_rl_comparison_500ep.py --episodes 500 --steps-per-episode 30 \
-  > figures/comparison_500ep_run.log 2>&1 &
-tail -f figures/comparison_500ep_run.log
+nohup python3 scripts/run_rl_comparison_500ep.py --episodes 500 --steps-per-episode 30 \
+  > outputs/comparison_500ep_run.log 2>&1 &
+tail -f outputs/comparison_500ep_run.log
 ```
 
-Outputs:
+Typical outputs (under your `--out-dir` / `--tag` folder):
 
-- `figures/throughput_vs_episodes_500.png` — episode throughput (raw + smoothed).
-- `figures/reward_vs_episodes_500.png` — episode return (raw + smoothed).
-- `figures/rl_comparison_500ep_results.json` — numeric traces for replotting.
+- `throughput_vs_episodes.png` — episode throughput (raw + smoothed).
+- `reward_vs_episodes.png` — episode return (raw + smoothed).
+- `rl_results.json` — numeric traces for replotting.
 
-Optional: `--seed`, `--num-uavs`, `--num-users`, `--out-dir`.
+Optional: `--seed`, `--num-uavs`, `--num-users`, `--out-dir`, `--tag`.
 
 ---
 
@@ -126,8 +126,8 @@ Optional: `--seed`, `--num-uavs`, `--num-users`, `--out-dir`.
 | Signal map, rewards, handovers, obs layout | `rl_agent/marl_env.py` |
 | Adaptive association rule + optional QMIX agent | `rl_agent/AdaptiveNonStationaryMARL.py` (`standalone_association_function` for MAPPO) |
 | MAPPO | `rl_agent/MAPPO.py` |
-| Shared training loop for comparisons | `compare_all_rl_convergence.py` (`train_model`) |
-| 500-episode runner | `run_rl_comparison_500ep.py` |
+| Shared training loop for comparisons | `scripts/compare_all_rl_convergence.py` (`train_model`) |
+| 500-episode runner | `scripts/run_rl_comparison_500ep.py` |
 
 ---
 

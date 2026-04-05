@@ -19,36 +19,32 @@ This paper introduces a **decentralized MARL framework** to optimize UAV positio
 📌 **IEEE Standard:** 802.11ac (Wi-Fi 5)  
 ---
 
-## 📁 Project Structure
+## Repository layout
+
+Run all Python entry points **from the repository root** (e.g. `python3 scripts/train_iql.py`). `scripts/repo_paths.py` is imported first so `rl_agent` resolves correctly.
+
 ```
-├── train.py                         # Deep Nash Q-learning agent
-├── train_iql.py                     # Independent Q-Learning
-├── train_qmix.py                    # QMIX algorithm
-├── train_vdn.py                     # VDN algorithm
-├── train_maddpg.py                  # MADDPG algorithm
-├── train_mappo.py                   # MAPPO
-├── train_adaptive_nonstationary.py  # Adaptive non-stationary MARL (QMIX + association)
-├── compare_all_marl.py              # Compare value-based MARL algorithms
-├── compare_all_rl_convergence.py    # RL convergence comparison (MAPPO family + baselines)
-├── run_rl_comparison_500ep.py       # Full performative MARL benchmark runner
-├── make_final_figures.py            # Build publication PNGs from saved rl_results.json
-├── replot_from_checkpoints.py       # Rebuild curves from checkpoint metrics.json
-├── publication_marl_plots.py      # Publication-style convergence figures
-├── compare_versions.py              # Compare old vs new (fixed vs variable height)
-├── test_performance.py              # Performance validation tests
-├── PERFORMATIVE_MARL.md             # PerformativeMFMARL / PerformativeMARL MDP notes
-├── README_MF_SIGNAL_MAP_MARL.md     # Signal map + occupancy observation details
-├── rl_agent/
-│   ├── marl_env.py                  # MARL environment (performative, signal map, energy metrics)
-│   ├── MAPPO.py
-│   ├── IQL.py, VDN.py, QMIX.py, DeepNashQ.py, MADDPG.py
-│   └── AdaptiveNonStationaryMARL.py
-├── final_figures/                   # Checked-in publication plots (regenerate via make_final_figures.py)
+├── docs/                    # Technical notes (performative MARL, signal-map MDP)
+├── scripts/                 # Training, comparisons, benchmarks, plotting utilities
+│   ├── repo_paths.py        # Sys.path bootstrap (import before rl_agent)
+│   ├── train*.py            # Per-algorithm trainers
+│   ├── compare_all_marl.py
+│   ├── compare_all_rl_convergence.py
+│   ├── run_rl_comparison_500ep.py
+│   ├── make_final_figures.py
+│   ├── replot_from_checkpoints.py
+│   └── publication_marl_plots.py
+├── tests/
+│   └── test_performance.py
+├── rl_agent/                # Environment + MARL implementations
+├── assets/figures/          # Checked-in publication PNGs (optional to regenerate)
 ├── requirements.txt
 ├── LICENSE, Makefile, .gitignore
 ```
 
-Large run artifacts (`figures/`, `cache_runs/`, `models/`, `results/`, logs, checkpoints) are **not** committed; reproduce them with the training scripts above.
+**Documentation:** [docs/README.md](docs/README.md) indexes `docs/performative_marl.md` and `docs/signal_map_marl.md`.
+
+Generated runs, logs, checkpoints, and large caches go under **`outputs/`** (default for benchmarks), **`cache_runs/`**, **`models/`**, etc.; these paths are **gitignored**. Regenerate with the scripts above.
 
 
 ---
@@ -98,57 +94,58 @@ We aim to:
 
 ### Learning curves (publication-style)
 
-Example convergence figures from a full benchmark run are committed under `final_figures/` (e.g. `final_figures/convergence_combined.png`). Regenerate from a saved aggregate JSON:
+Example convergence figures are committed under **`assets/figures/`** (for example `assets/figures/convergence_combined.png`). Regenerate from a saved `rl_results.json`:
 
 ```bash
-MPLBACKEND=Agg python3 make_final_figures.py --results path/to/rl_results.json --out-dir final_figures
+MPLBACKEND=Agg python3 scripts/make_final_figures.py \
+  --results outputs/ep500/rl_results.json \
+  --out-dir assets/figures
 ```
 
 ---
 
-## 🚀 Getting Started
+## Getting started
 
-### 🔧 Setup Environment
+### Environment
+
 ```bash
 pip install -r requirements.txt
+```
 
-🏋️ Train RL Models
+### Train RL agents (from repository root)
 
-python train_iql.py    # Independent Q-Learning
-python train_vdn.py    # VDN
-python train_qmix.py   # QMIX
-python train.py        # Deep Nash Q
-python train_maddpg.py # MADDPG
+```bash
+python3 scripts/train_iql.py
+python3 scripts/train_vdn.py
+python3 scripts/train_qmix.py
+python3 scripts/train.py              # Deep Nash Q
+python3 scripts/train_maddpg.py
+python3 scripts/train_mappo.py
+python3 scripts/train_adaptive_nonstationary.py
+```
 
-📊 Compare All Algorithms
+### Compare algorithms
 
-python compare_all_marl.py  # Comprehensive comparison of all MARL methods
+```bash
+python3 scripts/compare_all_marl.py           # Value-based MARL suite
+python3 scripts/run_rl_comparison_500ep.py    # Performative benchmark + baselines
+```
 
-🔬 Run Baseline Models
+### Other utilities
 
-python model.py        # Deterministic I
-python abid_model.py   # Deterministic II
+```bash
+python3 scripts/compare_versions.py
+python3 scripts/check_gpu.py
+python3 tests/test_performance.py
+```
 
-📈 Compare Models
-python compare_models.py
-📁 Plots and data saved in /results
+### Dependencies
 
-📦 Dependencies
+Python 3.8+, PyTorch ≥ 1.9, Gymnasium ≥ 0.26, NumPy, Matplotlib, SciPy, tqdm (see `requirements.txt`).
 
-Python 3.8+
-PyTorch ≥ 1.9.0
-Gymnasium ≥ 0.26.0
-NumPy, Matplotlib, Pandas, SciPy, tqdm
-pip install -r requirements.txt
+### Simulation notes
 
-🔬 Simulation Environment
-
-3D grid: 10×10×5 m³
-UAVs fly at variable altitudes (5-50m) with height-dependent LOS probability
-Wi-Fi standard: IEEE 802.11ac (CSMA/CA)
-Dynamic UE mobility (random waypoint)
-TDMA-based user scheduling
-Evaluation over 1000+ episodes with statistical significance
+3D grid 10×10×5 m³; UAV heights roughly 5–50 m with height-dependent LoS; IEEE 802.11–style rate modeling; dynamic UE mobility; evaluation over many episodes.
 
 ---
 
@@ -190,33 +187,30 @@ This repository now includes **variable height optimization** with height-depend
 ### Testing Variable Height
 
 ```bash
-# Run UE density comparison test
-python test_ue_density.py
-
-# Run general version comparison
-python compare_versions.py
+# Version / height comparison (writes PNGs to current working directory)
+python3 scripts/compare_versions.py
 ```
 
-Generated plots:
-- `ue_density_comparison.png`: Comprehensive UE density analysis
-- `ue_density_detailed_analysis.png`: Detailed scaling analysis
-```
-📚 References
+Optional: `python3 tests/test_performance.py` for environment smoke tests. Generated plots from these scripts are ignored by git unless renamed.
 
-IEEE 802.11ac Wi-Fi standard
-Jain’s Index for Fairness [DEC TR-301]
-QMIX [ICML 2018], VDN [AAMAS 2018], Deep Nash Q-learning [JMLR 2003]
-Bianchi’s model for 802.11 throughput analysis
+---
 
-🪪 License
+## References
 
-This repository is licensed under the MIT License. See LICENSE for details.
+- IEEE 802.11ac Wi-Fi standard  
+- Jain’s fairness index (e.g. DEC TR-301)  
+- QMIX (ICML 2018), VDN (AAMAS 2018), Deep Nash Q-learning (JMLR 2003)  
+- Bianchi’s model for 802.11 throughput analysis  
 
-🙌 Acknowledgements
+## License
+
+This repository is licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Acknowledgements
 
 We thank the research advisors and collaborators from SDSU and Shiv Nadar Institution of Eminence for their guidance.
 
-🔗 Citation
+## Citation
 
 If you use this code or paper in your work, please cite:
 

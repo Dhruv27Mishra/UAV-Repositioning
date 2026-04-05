@@ -1,6 +1,9 @@
 """
 Main training script for the UAV MARL system using Deep Nash Q-learning.
 """
+
+import repo_paths  # noqa: F401
+
 import numpy as np
 from rl_agent.marl_env import MARLEnv
 from rl_agent.DeepNashQ import DeepNashQ

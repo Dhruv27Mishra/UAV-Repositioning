@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Build publication PNG figures into ``final_figures/`` from a saved ``rl_results.json``.
+Build publication PNG figures (default under ``assets/figures/``) from a saved ``rl_results.json``.
 
-Example:
-  MPLBACKEND=Agg python3 make_final_figures.py \\
-    --results figures/convergence_2000ep_pub_tuned/rl_results.json
+Example (from repository root):
+
+  MPLBACKEND=Agg python3 scripts/make_final_figures.py \\
+    --results outputs/ep2000/rl_results.json
 """
 from __future__ import annotations
+
+import repo_paths  # noqa: F401
 
 import argparse
 import json
@@ -35,13 +38,13 @@ def main() -> None:
     p.add_argument(
         "--results",
         type=str,
-        default="figures/convergence_2000ep_pub_tuned/rl_results.json",
+        default="outputs/rl_results.json",
         help="Path to rl_results.json",
     )
     p.add_argument(
         "--out-dir",
         type=str,
-        default="final_figures",
+        default="assets/figures",
         help="Output directory for PNGs",
     )
     p.add_argument(

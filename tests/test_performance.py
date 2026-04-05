@@ -1,6 +1,13 @@
 """
 Test script to verify performance with variable height and height-dependent LOS probability.
 """
+from pathlib import Path
+import sys
+
+_root = next(p for p in Path(__file__).resolve().parents if (p / "rl_agent" / "marl_env.py").exists())
+if str(_root) not in sys.path:
+    sys.path.append(str(_root))
+
 import numpy as np
 from rl_agent.marl_env import MARLEnv
 import torch

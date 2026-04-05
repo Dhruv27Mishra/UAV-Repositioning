@@ -3,6 +3,8 @@ Comprehensive comparison script for all MARL algorithms.
 Compares: IQL, VDN, QMIX, Deep Nash Q, MADDPG
 """
 
+import repo_paths  # noqa: F401
+
 import numpy as np
 import matplotlib.pyplot as plt
 from rl_agent.marl_env import MARLEnv

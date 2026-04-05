@@ -14,6 +14,8 @@ Outputs:
 - goodness_vs_ue_density_all_enhanced.png
 """
 
+import repo_paths  # noqa: F401
+
 import os
 import json
 import time

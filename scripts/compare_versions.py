@@ -1,6 +1,9 @@
 """
 Comparison script between old version (fixed height) and new version (variable height).
 """
+
+import repo_paths  # noqa: F401
+
 import numpy as np
 import matplotlib.pyplot as plt
 from rl_agent.marl_env import MARLEnv

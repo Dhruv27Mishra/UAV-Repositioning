@@ -7,6 +7,8 @@ Use after moving or archiving runs; drops baseline MAPPO from plots by default.
 """
 from __future__ import annotations
 
+import repo_paths  # noqa: F401
+
 import argparse
 import json
 import os
@@ -111,7 +113,7 @@ def main() -> None:
         "--checkpoint-root",
         type=str,
         required=True,
-        help="e.g. figures/convergence_2000ep_seed0/checkpoints",
+        help="e.g. outputs/ep2000/checkpoints",
     )
     p.add_argument(
         "--out-dir",

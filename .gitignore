@@ -8,6 +8,7 @@ venv/
 .venv/
 
 # Training / experiment outputs (regenerate with scripts)
+outputs/
 figures/
 cache_runs/
 models/
@@ -22,11 +23,11 @@ summary_last_window.json
 # IDE (local only)
 .vscode/
 
-# Images: keep publication outputs only
+# Images: keep checked-in publication figures only
 *.png
-!final_figures/*.png
+!assets/figures/*.png
 
-# Legacy single-file exception (if present)
+# Legacy single-file exception (if present at repo root)
 !comparison_results.png
 
 # OS / misc

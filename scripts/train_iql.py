@@ -1,12 +1,16 @@
 """
-Training script for VDN (Value Decomposition Networks) algorithm.
+Training script for Independent Q-Learning (IQL).
 """
+
+import repo_paths  # noqa: F401
+
 import numpy as np
 from rl_agent.marl_env import MARLEnv
-from rl_agent.VDN import VDN
+from rl_agent.IQL import IQL
 import torch
 import os
 from tqdm import tqdm
+import time
 
 
 def jains_fairness(user_rates):
@@ -18,9 +22,9 @@ def jains_fairness(user_rates):
 
 
 def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
-          learning_rate=0.001, gamma=0.99, epsilon=0.1, save_interval=50,
-          buffer_size=10000, batch_size=64, target_update=100):
-    """Train VDN agents."""
+          learning_rate=0.001, gamma=0.99, epsilon=0.1, eval_interval=10,
+          save_interval=50, buffer_size=10000, batch_size=64, target_update=100):
+    """Train IQL agents."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
@@ -28,16 +32,17 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
     state_dim = getattr(env, "agent_obs_dim", 3)
     action_dim = env.action_space.nvec[0]
     
-    agent = VDN(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
+    agent = IQL(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
                 learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
                 device=device, buffer_size=buffer_size, batch_size=batch_size,
                 target_update=target_update)
     
-    pbar = tqdm(range(num_episodes), desc="Training VDN")
+    pbar = tqdm(range(num_episodes), desc="Training IQL")
     total_collisions = 0
     total_throughput = 0.0
     episode_rewards = []
     episode_throughputs = []
+    episode_fairnesses = []
     
     for episode in pbar:
         obs, _ = env.reset()
@@ -73,6 +78,10 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
                 total_collisions += 1
             episode_throughput += info['throughput']
             total_throughput += info['throughput']
+            
+            if 'user_rates' in info:
+                episode_fairness = jains_fairness(info['user_rates'])
+                episode_fairnesses.append(episode_fairness)
         
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',
@@ -82,13 +91,13 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
         
         if (episode + 1) % save_interval == 0:
             os.makedirs("models", exist_ok=True)
-            agent.save(f"models/vdn_episode_{episode+1}.pt")
+            agent.save(f"models/iql_episode_{episode+1}.pt")
         
         episode_rewards.append(episode_reward)
         episode_throughputs.append(episode_throughput)
     
     os.makedirs("models", exist_ok=True)
-    agent.save("models/vdn_final.pt")
+    agent.save("models/iql_final.pt")
     
     print("\nTraining completed!")
     print(f"Total episodes: {num_episodes}")
@@ -96,7 +105,7 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
     print(f"Total throughput: {total_throughput:.2f}")
     print(f"Average throughput per episode: {total_throughput/num_episodes:.2f}")
     
-    return episode_rewards, episode_throughputs
+    return episode_rewards, episode_throughputs, episode_fairnesses
 
 
 if __name__ == "__main__":

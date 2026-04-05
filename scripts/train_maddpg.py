@@ -1,6 +1,9 @@
 """
 Training script for MADDPG algorithm.
 """
+
+import repo_paths  # noqa: F401
+
 import numpy as np
 from rl_agent.marl_env import MARLEnv
 from rl_agent.MADDPG import MADDPG

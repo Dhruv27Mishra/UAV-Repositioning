@@ -2,6 +2,8 @@
 Compare convergence of novel algorithms (PerformativeMFMARL / PerformativeMARL: MAPPO + adaptive association)
 vs other RL models (QMIX, IQL, VDN, MADDPG, DeepNashQ) with regular model.
 """
+import repo_paths  # noqa: F401
+
 import json
 import logging
 import os

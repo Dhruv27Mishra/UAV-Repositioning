@@ -1,9 +1,12 @@
 """
-Training script for QMIX algorithm.
+Training script for VDN (Value Decomposition Networks) algorithm.
 """
+
+import repo_paths  # noqa: F401
+
 import numpy as np
 from rl_agent.marl_env import MARLEnv
-from rl_agent.QMIX import QMIX
+from rl_agent.VDN import VDN
 import torch
 import os
 from tqdm import tqdm
@@ -20,22 +23,20 @@ def jains_fairness(user_rates):
 def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
           learning_rate=0.001, gamma=0.99, epsilon=0.1, save_interval=50,
           buffer_size=10000, batch_size=64, target_update=100):
-    """Train QMIX agents."""
+    """Train VDN agents."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device,
-                 enable_non_stationary=True, enable_performative=True)
-    state_dim = getattr(env, "agent_obs_dim", env.observation_space.shape[0] // num_uavs)
+    env = MARLEnv(num_uavs=num_uavs, grid_size=grid_size, device=device)
+    state_dim = getattr(env, "agent_obs_dim", 3)
     action_dim = env.action_space.nvec[0]
-    global_state_dim = env.observation_space.shape[0]
     
-    agent = QMIX(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
-                 global_state_dim=global_state_dim, learning_rate=learning_rate,
-                 gamma=gamma, epsilon=epsilon, device=device, buffer_size=buffer_size,
-                 batch_size=batch_size, target_update=target_update)
+    agent = VDN(num_agents=num_uavs, state_dim=state_dim, action_dim=action_dim,
+                learning_rate=learning_rate, gamma=gamma, epsilon=epsilon,
+                device=device, buffer_size=buffer_size, batch_size=batch_size,
+                target_update=target_update)
     
-    pbar = tqdm(range(num_episodes), desc="Training QMIX")
+    pbar = tqdm(range(num_episodes), desc="Training VDN")
     total_collisions = 0
     total_throughput = 0.0
     episode_rewards = []
@@ -62,12 +63,8 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
             
             states = [obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
             next_states = [next_obs_tensor[i * state_dim:(i + 1) * state_dim] for i in range(num_uavs)]
-            global_state = obs_tensor.flatten()
-            next_global_state = next_obs_tensor.flatten()
-            
             agent.store_transition(states, actions, [reward] * num_uavs,
-                                  next_states, [done] * num_uavs,
-                                  global_state, next_global_state)
+                                  next_states, [done] * num_uavs)
             agent.update()
             
             obs = next_obs
@@ -80,8 +77,6 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
             episode_throughput += info['throughput']
             total_throughput += info['throughput']
         
-        env.end_episode()
-        
         pbar.set_postfix({
             'reward': f'{episode_reward:.2f}',
             'collisions': episode_collisions,
@@ -90,13 +85,13 @@ def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
         
         if (episode + 1) % save_interval == 0:
             os.makedirs("models", exist_ok=True)
-            agent.save(f"models/qmix_episode_{episode+1}.pt")
+            agent.save(f"models/vdn_episode_{episode+1}.pt")
         
         episode_rewards.append(episode_reward)
         episode_throughputs.append(episode_throughput)
     
     os.makedirs("models", exist_ok=True)
-    agent.save("models/qmix_final.pt")
+    agent.save("models/vdn_final.pt")
     
     print("\nTraining completed!")
     print(f"Total episodes: {num_episodes}")
