@@ -49,28 +49,35 @@ class AgentNetwork(nn.Module):
         self, obs: torch.Tensor, hidden=None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple]:
         """
-        obs    : (batch, obs_dim)  or  (batch, seq_len, obs_dim)
-        Returns: q_traj, q_bf, q_agent (summed), hidden
+        obs    : (B, obs_dim)  or  (B, T, obs_dim)
+        Returns: q_traj (B, T, traj_actions), q_bf (B, T, bf_actions),
+                 q_agent (B, T), hidden
+        For single-step inference T=1; update() passes full episode T>1.
         """
         if obs.dim() == 2:
             obs = obs.unsqueeze(1)                              # (B, 1, obs_dim)
 
-        x = self.fc1(obs)                                       # (B, seq, 256)
-        lstm_out, hidden = self.lstm(x, hidden)
-        feat = lstm_out[:, -1, :]                               # (B, 128)
+        B, T, _ = obs.shape
+        x = self.fc1(obs)                                       # (B, T, 256)
+        lstm_out, hidden = self.lstm(x, hidden)                 # (B, T, 128)
+
+        # Flatten across batch and time so linear heads see (B*T, 128)
+        feat = lstm_out.reshape(B * T, self.hidden2)            # (B*T, 128)
 
         # Trajectory Q  (Eq. 38)
-        v_t    = self.traj_value(feat)
-        a_t    = self.traj_adv(feat)
-        q_traj = v_t + (a_t - a_t.mean(dim=1, keepdim=True))   # (B, traj_actions)
+        v_t    = self.traj_value(feat)                          # (B*T, 1)
+        a_t    = self.traj_adv(feat)                            # (B*T, traj_actions)
+        q_traj = v_t + (a_t - a_t.mean(dim=1, keepdim=True))   # (B*T, traj_actions)
+        q_traj = q_traj.reshape(B, T, self.traj_action_dim)     # (B, T, traj_actions)
 
         # Beamforming Q  (Eq. 38)
-        v_b  = self.bf_value(feat)
-        a_b  = self.bf_adv(feat)
-        q_bf = v_b + (a_b - a_b.mean(dim=1, keepdim=True))     # (B, bf_actions)
+        v_b  = self.bf_value(feat)                              # (B*T, 1)
+        a_b  = self.bf_adv(feat)                                # (B*T, bf_actions)
+        q_bf = v_b + (a_b - a_b.mean(dim=1, keepdim=True))     # (B*T, bf_actions)
+        q_bf = q_bf.reshape(B, T, self.bf_action_dim)          # (B, T, bf_actions)
 
         # Combined agent Q for mixing network  (Section 3.2.2)
-        q_agent = q_traj.max(dim=1).values + q_bf.max(dim=1).values  # (B,)
+        q_agent = q_traj.max(dim=-1).values + q_bf.max(dim=-1).values  # (B, T)
 
         return q_traj, q_bf, q_agent, hidden
 

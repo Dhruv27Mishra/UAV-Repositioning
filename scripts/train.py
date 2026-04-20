@@ -20,7 +20,7 @@ def jains_fairness(user_rates):
     denominator = len(user_rates) * np.sum(user_rates ** 2)
     return numerator / denominator if denominator != 0 else 0
 
-def train(num_episodes=1000,
+def train(num_episodes=2000,
           num_uavs=7,
           grid_size=(10, 10, 5),
           learning_rate=0.001,

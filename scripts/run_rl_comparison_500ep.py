@@ -27,6 +27,8 @@ from rl_agent.VDN import VDN
 from rl_agent.MADDPG import MADDPG
 from rl_agent.DeepNashQ import DeepNashQ
 from rl_agent.MAPPO import MAPPO
+from rl_agent.ab_qmix_algorithm import ABQMIX
+from rl_agent.dmtd_algorithm import DMTD
 
 from compare_all_rl_convergence import train_model, compute_moving_average
 from publication_marl_plots import finalize_training_episodes_xaxis
@@ -98,6 +100,10 @@ def _build_env(
     enable_signal_map_obs: bool = True,
     min_user_rate: float = 0.5,
     qos_bonus: float = 10.0,
+    traffic_model: str = 'pareto',
+    pareto_shape: float = 1.5,
+    pareto_scale: float = 2.0,
+    traffic_load: float = 1.0,
 ) -> MARLEnv:
     kw: Dict[str, Any] = dict(
         num_uavs=num_uavs,
@@ -111,6 +117,10 @@ def _build_env(
         enable_signal_map_obs=enable_signal_map_obs,
         use_occupancy_performative=use_occupancy_performative,
         enable_occupancy_obs=enable_occupancy_obs,
+        traffic_model=traffic_model,
+        pareto_shape=pareto_shape,
+        pareto_scale=pareto_scale,
+        traffic_load=traffic_load,
     )
     if shaped:
         kw.update(
@@ -131,33 +141,33 @@ def plot_comparison_basic(
 ) -> None:
     os.makedirs(os.path.dirname(out_throughput) or ".", exist_ok=True)
     episodes = np.arange(1, num_episodes + 1, dtype=np.float64)
-    window = max(5, min(50, max(5, num_episodes // 10)))
+    window = max(50, int(num_episodes * 0.15))  # 15% of episodes — no raw trace needed
 
-    cmap = plt.cm.tab10(np.linspace(0, 0.9, len(ordered_names)))
-    name_to_color = {n: cmap[i] for i, n in enumerate(ordered_names)}
+    # Okabe-Ito palette (colorblind-safe, consistent with publication figures)
+    _OKI = ["#0072B2", "#D55E00", "#009E73", "#CC79A7",
+            "#E69F00", "#56B4E9", "#F0E442", "#000000"]
+    name_to_color = {n: _OKI[i % len(_OKI)] for i, n in enumerate(ordered_names)}
 
-    fig1, ax1 = plt.subplots(figsize=(12, 6))
-    fig2, ax2 = plt.subplots(figsize=(12, 6))
+    fig1, ax1 = plt.subplots(figsize=(10, 4.5))
+    fig2, ax2 = plt.subplots(figsize=(10, 4.5))
 
     for agent_name in ordered_names:
         if agent_name not in results:
             continue
         color = name_to_color[agent_name]
         is_prop = agent_name in proposed_names
-        lw = 3.0 if is_prop else 2.0
-        ls = "-" if is_prop else "-"
+        lw = 2.6 if is_prop else 1.8
         z = 4 if is_prop else 2
 
         tp_gbps = np.array(results[agent_name]["throughputs"], dtype=np.float64) / 1e9
         rw = np.array(results[agent_name]["rewards"], dtype=np.float64)
 
-        ax1.plot(episodes, tp_gbps, "-", alpha=0.06, linewidth=0.4, color=color)
+        # Smooth only — no raw traces, no variance bands
         s1 = compute_moving_average(tp_gbps, window)
-        ax1.plot(episodes, s1, ls, linewidth=lw, label=agent_name, color=color, zorder=z)
+        ax1.plot(episodes, s1, "-", linewidth=lw, label=agent_name, color=color, zorder=z)
 
-        ax2.plot(episodes, rw, "-", alpha=0.06, linewidth=0.4, color=color)
         s2 = compute_moving_average(rw, window)
-        ax2.plot(episodes, s2, ls, linewidth=lw, label=agent_name, color=color, zorder=z)
+        ax2.plot(episodes, s2, "-", linewidth=lw, label=agent_name, color=color, zorder=z)
 
     finalize_training_episodes_xaxis(ax1, num_episodes)
     ax1.set_ylabel("Episode throughput (Gbps)", fontsize=12)
@@ -192,21 +202,22 @@ def plot_comparison_basic_energy(
     """Smoothed energy efficiency (Mbit/J) and episode energy (MJ)."""
     os.makedirs(os.path.dirname(out_eff) or ".", exist_ok=True)
     episodes = np.arange(1, num_episodes + 1, dtype=np.float64)
-    window = max(5, min(50, max(5, num_episodes // 10)))
-    cmap = plt.cm.tab10(np.linspace(0, 0.9, len(ordered_names)))
-    name_to_color = {n: cmap[i] for i, n in enumerate(ordered_names)}
+    window = max(50, int(num_episodes * 0.15))  # 15 % of episodes
+    _OKI = ["#0072B2", "#D55E00", "#009E73", "#CC79A7",
+            "#E69F00", "#56B4E9", "#F0E442", "#000000"]
+    name_to_color = {n: _OKI[i % len(_OKI)] for i, n in enumerate(ordered_names)}
 
     def draw_file(path: str, key: str, scale: float, ylabel: str, title: str) -> None:
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(10, 4.5))
         for agent_name in ordered_names:
             if agent_name not in results or key not in results[agent_name]:
                 continue
             color = name_to_color[agent_name]
             is_prop = agent_name in proposed_names
-            lw = 3.0 if is_prop else 2.0
+            lw = 2.6 if is_prop else 1.8
             z = 4 if is_prop else 2
             y = np.array(results[agent_name][key], dtype=np.float64) * scale
-            ax.plot(episodes, y, "-", alpha=0.06, linewidth=0.4, color=color)
+            # Smooth only — no raw trace, no band
             sm = compute_moving_average(y, window)
             ax.plot(episodes, sm, "-", linewidth=lw, label=agent_name, color=color, zorder=z)
         finalize_training_episodes_xaxis(ax, num_episodes)
@@ -322,11 +333,19 @@ def main() -> None:
     ck_every = args.checkpoint_every if args.checkpoint_every > 0 else None
     ck_root = os.path.join(run_dir, "checkpoints") if ck_every else None
 
+    # Pareto VBR traffic: d_i = scale × (Pareto(α=1.5)+1) × load [bps]
+    pareto_env_extra = dict(
+        traffic_model='pareto',
+        pareto_shape=1.5,
+        pareto_scale=2.0,
+        traffic_load=1.0,
+    )
     base_env = dict(
         shaped=False,
         use_occupancy_performative=False,
         enable_occupancy_obs=False,
         enable_signal_map_obs=True,
+        **pareto_env_extra,
     )
     adaptive_env = dict(
         shaped=True,
@@ -341,16 +360,19 @@ def main() -> None:
         enable_occupancy_obs=False,
         enable_signal_map_obs=False,
         qos_bonus=11.5,
+        **pareto_env_extra,
     )
     # Slightly stricter QoS threshold for QMIX/MADDPG only (fewer bonus reward episodes).
     qmix_env = {**base_env, "min_user_rate": 0.58}
     maddpg_env = {**base_env, "min_user_rate": 0.58}
     specs: List[Tuple[str, type, Dict[str, Any]]] = [
         ("QMIX", QMIX, qmix_env),
+        ("AB-QMIX", ABQMIX, base_env),
         ("IQL", IQL, base_env),
         ("VDN", VDN, base_env),
         ("MADDPG", MADDPG, maddpg_env),
         ("DeepNashQ", DeepNashQ, base_env),
+        ("DMTD", DMTD, base_env),
         ("PerformativeMFMARL", MAPPO, adaptive_env),
         ("PerformativeMARL", MAPPO, adaptive_no_mf_env),
     ]
@@ -433,6 +455,10 @@ def main() -> None:
             enable_signal_map_obs=ekw["enable_signal_map_obs"],
             min_user_rate=float(ekw.get("min_user_rate", 0.5)),
             qos_bonus=float(ekw.get("qos_bonus", 10.0)),
+            traffic_model=ekw.get("traffic_model", "pareto"),
+            pareto_shape=float(ekw.get("pareto_shape", 1.5)),
+            pareto_scale=float(ekw.get("pareto_scale", 2.0)),
+            traffic_load=float(ekw.get("traffic_load", 1.0)),
         )
         out = train_model(
             cls,

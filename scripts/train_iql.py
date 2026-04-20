@@ -21,7 +21,7 @@ def jains_fairness(user_rates):
     return numerator / denominator if denominator != 0 else 0
 
 
-def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
+def train(num_episodes=2000, num_uavs=7, grid_size=(10, 10, 5),
           learning_rate=0.001, gamma=0.99, epsilon=0.1, eval_interval=10,
           save_interval=50, buffer_size=10000, batch_size=64, target_update=100):
     """Train IQL agents."""

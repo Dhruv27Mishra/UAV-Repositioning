@@ -20,6 +20,8 @@ from rl_agent.MADDPG import MADDPG
 from rl_agent.DeepNashQ import DeepNashQ
 from rl_agent.MAPPO import MAPPO
 from rl_agent.AdaptiveNonStationaryMARL import AdaptiveNonStationaryMARL
+from rl_agent.ab_qmix_algorithm import ABQMIX
+from rl_agent.dmtd_algorithm import DMTD
 import torch
 from tqdm import tqdm
 
@@ -209,6 +211,43 @@ def train_model(
             hyperparam_overrides,
         )
         agent = agent_class(**kw)
+    elif agent_name == "AB-QMIX":
+        global_state_dim = env.observation_space.shape[0]
+        kw = _hp(
+            dict(
+                num_agents=num_uavs,
+                obs_dim=state_dim,
+                global_state_dim=global_state_dim,
+                traj_action_dim=int(action_dim),
+                bf_action_dim=1,
+                gamma=gamma,
+                learning_rate=1e-4,
+                epsilon=1.0,
+                epsilon_min=0.1,
+                c_min=1000,
+                batch_size=4,
+                device=device,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
+    elif agent_name == "DMTD":
+        kw = _hp(
+            dict(
+                num_uavs=num_uavs,
+                state_dim=state_dim,
+                action_dim=int(action_dim),
+                gamma=gamma,
+                learning_rate=learning_rate,
+                epsilon=1.0,
+                epsilon_min=0.05,
+                buffer_capacity=10000,
+                batch_size=64,
+                device=device,
+            ),
+            hyperparam_overrides,
+        )
+        agent = agent_class(**kw)
     else:
         raise ValueError(f"Unknown agent: {agent_name}")
     
@@ -218,6 +257,7 @@ def train_model(
     episode_goodness = []
     episode_energy_efficiencies = []
     episode_energies_j = []
+    global_step = 0  # cumulative step counter for DMTD
     print(f"  Running {num_episodes} episodes...")
     if logger:
         logger.info("Starting training agent=%s episodes=%d", agent_name, num_episodes)
@@ -273,26 +313,42 @@ def train_model(
         trajectory_dones = []
         trajectory_log_probs = []
         
+        # AB-QMIX uses episode-level replay — reset hidden state each episode
+        if agent_name == "AB-QMIX":
+            agent.start_episode()
+
         while not done and step_count < num_steps_per_episode:
             # Get actions from agent
-            actions = []
-            log_probs = []
-            for i in range(num_uavs):
-                # Adjust agent_obs slicing for potentially expanded observation space
-                agent_obs = obs_tensor[i*state_dim:(i+1)*state_dim]
-                if agent_name == "AdaptiveNonStationaryMARL":
-                    action = agent.get_action(agent_obs, i, global_state=obs_tensor)
-                    log_probs.append(0.0)  # Not used for this agent
-                elif agent_name in MAPPO_FAMILY:
-                    action, log_prob = agent.get_action(agent_obs, i, explore=True)
-                    log_probs.append(log_prob)
-                elif agent_name == "MADDPG":
-                    action = agent.get_action(agent_obs, i, explore=True)
-                    log_probs.append(0.0)  # Not used for this agent
-                else:
-                    action = agent.get_action(agent_obs, i)
-                    log_probs.append(0.0)  # Not used for this agent
-                actions.append(action)
+            # AB-QMIX and DMTD use batch get_actions (list of np arrays)
+            obs_np = [obs_tensor[i*state_dim:(i+1)*state_dim].cpu().numpy()
+                      for i in range(num_uavs)]
+            ab_joint = None  # used only by AB-QMIX
+            if agent_name == "AB-QMIX":
+                ab_joint = agent.get_actions(obs_np)
+                actions   = [pair[0] for pair in ab_joint]
+                log_probs = [0.0] * num_uavs
+            elif agent_name == "DMTD":
+                actions   = agent.get_actions(obs_np)
+                log_probs = [0.0] * num_uavs
+            else:
+                actions = []
+                log_probs = []
+                for i in range(num_uavs):
+                    # Adjust agent_obs slicing for potentially expanded observation space
+                    agent_obs = obs_tensor[i*state_dim:(i+1)*state_dim]
+                    if agent_name == "AdaptiveNonStationaryMARL":
+                        action = agent.get_action(agent_obs, i, global_state=obs_tensor)
+                        log_probs.append(0.0)  # Not used for this agent
+                    elif agent_name in MAPPO_FAMILY:
+                        action, log_prob = agent.get_action(agent_obs, i, explore=True)
+                        log_probs.append(log_prob)
+                    elif agent_name == "MADDPG":
+                        action = agent.get_action(agent_obs, i, explore=True)
+                        log_probs.append(0.0)  # Not used for this agent
+                    else:
+                        action = agent.get_action(agent_obs, i)
+                        log_probs.append(0.0)  # Not used for this agent
+                    actions.append(action)
             
             # Step environment
             next_obs, reward, terminated, truncated, info = env.step(actions)
@@ -312,6 +368,9 @@ def train_model(
             states = [obs_tensor[i*state_dim:(i+1)*state_dim] for i in range(num_uavs)]
             next_states = [next_obs_tensor[i*state_dim:(i+1)*state_dim] for i in range(num_uavs)]
             
+            next_obs_np = [next_obs_tensor[i*state_dim:(i+1)*state_dim].cpu().numpy()
+                           for i in range(num_uavs)]
+
             if agent_name in MAPPO_FAMILY:
                 # MAPPO is on-policy - store in trajectory for episode-end update
                 trajectory_states.append(states)
@@ -324,30 +383,47 @@ def train_model(
                 # Novel algorithm needs global state
                 global_state = obs_tensor
                 next_global_state = next_obs_tensor
-                agent.store_transition(states, actions, [reward] * num_uavs, 
-                                     next_states, [done] * num_uavs,
-                                     global_state, next_global_state)
+                agent.store_transition(states, actions, [reward] * num_uavs,
+                                       next_states, [done] * num_uavs,
+                                       global_state, next_global_state)
             elif agent_name.startswith("QMIX"):
                 # QMIX needs global state
                 global_state = obs_tensor
                 next_global_state = next_obs_tensor
-                agent.store_transition(states, actions, [reward] * num_uavs, 
-                                     next_states, [done] * num_uavs,
-                                     global_state, next_global_state)
+                agent.store_transition(states, actions, [reward] * num_uavs,
+                                       next_states, [done] * num_uavs,
+                                       global_state, next_global_state)
+            elif agent_name == "AB-QMIX":
+                # AB-QMIX: store_transition(gs, obs, [[traj,bf],...], r, ngs, nobs)
+                agent.store_transition(
+                    obs_tensor.flatten().cpu().numpy(),
+                    obs_np,
+                    ab_joint,
+                    reward,
+                    next_obs_tensor.flatten().cpu().numpy(),
+                    next_obs_np,
+                )
+            elif agent_name == "DMTD":
+                # DMTD: store_transitions(states, actions, rewards, next_states, t)
+                agent.store_transitions(obs_np, actions, [reward] * num_uavs,
+                                        next_obs_np, global_step)
             elif agent_name == "MADDPG":
-                # MADDPG store_transition expects states and actions
-                agent.store_transition(states, actions, [reward] * num_uavs, 
-                                     next_states, [done] * num_uavs)
+                agent.store_transition(states, actions, [reward] * num_uavs,
+                                       next_states, [done] * num_uavs)
             else:
-                agent.store_transition(states, actions, [reward] * num_uavs, 
-                                     next_states, [done] * num_uavs)
-            
+                agent.store_transition(states, actions, [reward] * num_uavs,
+                                       next_states, [done] * num_uavs)
+
             # Update agent (off-policy agents update during episode)
-            # MAPPO is on-policy and updates after episode
-            if agent_name not in MAPPO_FAMILY:
+            if agent_name == "AB-QMIX":
+                agent.update()
+            elif agent_name == "DMTD":
+                agent.update(global_step)
+            elif agent_name not in MAPPO_FAMILY:
                 if hasattr(agent, 'replay_buffer') and len(agent.replay_buffer) > agent.batch_size and step_count % 2 == 0:
                     agent.update()
-            
+
+            global_step += 1
             # Update observation for next step
             obs_tensor = next_obs_tensor
         
@@ -360,9 +436,11 @@ def train_model(
                 )
             # Update after collecting full trajectory
             agent.update()
-            
-            obs_tensor = next_obs_tensor
-        
+
+        # AB-QMIX: commit episode to replay buffer
+        if agent_name == "AB-QMIX":
+            agent.end_episode()
+
         # Call end_episode for performative/non-stationary updates
         env.end_episode()
         
@@ -392,118 +470,60 @@ def train_model(
 
 
 def plot_rl_convergence_comparison(results_dict_regular, results_novel_enhanced, num_episodes):
-    """Create convergence comparison plots: Novel algo (enhanced) vs Others (regular)."""
-    
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6)) # 1x2 layout: throughput and reward
-    
-    episodes = np.arange(num_episodes)
-    window_size = min(100, num_episodes // 10)  # Larger window for better smoothing
-    
-    colors = {
-        'PerformativeMFMARL': 'red',
-        'QMIX': 'blue',
-        'IQL': 'green',
-        'VDN': 'orange',
-        'MADDPG': 'purple',
-        'DeepNashQ': 'brown'
-    }
-    
-    # Plot 1: Throughput Convergence (convert to Gbps)
-    ax1 = axes[0]
-    # Plot regular models
-    for agent_name, results in results_dict_regular.items():
-        color = colors.get(agent_name, 'gray')
-        # Convert bps to Gbps (divide by 1e9)
-        throughputs_gbps = np.array(results['throughputs']) / 1e9
-        ax1.plot(episodes, throughputs_gbps, '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
-        smoothed = compute_moving_average(throughputs_gbps, window_size)
-        ax1.plot(episodes, smoothed, '-', linewidth=3.5, label=agent_name, color=color, zorder=3)
-        
-        std_window = window_size
-        std_values = []
-        for i in range(len(throughputs_gbps)):
-            start_idx = max(0, i - std_window // 2)
-            end_idx = min(len(throughputs_gbps), i + std_window // 2 + 1)
-            std_values.append(np.std(throughputs_gbps[start_idx:end_idx]))
-        std_values = np.array(std_values)
-        ax1.fill_between(episodes, smoothed - std_values, smoothed + std_values, 
-                        alpha=0.15, color=color, zorder=2)
-    
-    # Plot novel algorithm with enhanced model
-    if 'PerformativeMFMARL' in results_novel_enhanced:
-        results = results_novel_enhanced['PerformativeMFMARL']
-        color = colors.get('PerformativeMFMARL', 'red')
-        # Convert bps to Gbps (divide by 1e9)
-        throughputs_gbps = np.array(results['throughputs']) / 1e9
-        ax1.plot(episodes, throughputs_gbps, '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
-        smoothed = compute_moving_average(throughputs_gbps, window_size)
-        ax1.plot(episodes, smoothed, '--', linewidth=3.5, label='PerformativeMFMARL',
-                color=color, zorder=3)
-        
-        std_window = window_size
-        std_values = []
-        for i in range(len(throughputs_gbps)):
-            start_idx = max(0, i - std_window // 2)
-            end_idx = min(len(throughputs_gbps), i + std_window // 2 + 1)
-            std_values.append(np.std(throughputs_gbps[start_idx:end_idx]))
-        std_values = np.array(std_values)
-        ax1.fill_between(episodes, smoothed - std_values, smoothed + std_values, 
-                        alpha=0.15, color=color, zorder=2)
-    
-    ax1.set_xlabel('Episode', fontsize=13, fontweight='bold')
-    ax1.set_ylabel('Total Throughput (Gbps)', fontsize=13, fontweight='bold')
-    ax1.set_title('Throughput Convergence Comparison', fontsize=15, fontweight='bold')
-    ax1.legend(fontsize=11, loc='lower right', framealpha=0.9)
-    ax1.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
-    
-    # Plot 2: Reward Convergence
-    ax2 = axes[1]
-    # Plot regular models
-    for agent_name, results in results_dict_regular.items():
-        color = colors.get(agent_name, 'gray')
-        ax2.plot(episodes, results['rewards'], '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
-        smoothed = compute_moving_average(results['rewards'], window_size)
-        ax2.plot(episodes, smoothed, '-', linewidth=3.5, label=agent_name, color=color, zorder=3)
-        
-        std_window = window_size
-        std_values = []
-        for i in range(len(results['rewards'])):
-            start_idx = max(0, i - std_window // 2)
-            end_idx = min(len(results['rewards']), i + std_window // 2 + 1)
-            std_values.append(np.std(results['rewards'][start_idx:end_idx]))
-        std_values = np.array(std_values)
-        ax2.fill_between(episodes, smoothed - std_values, smoothed + std_values, 
-                        alpha=0.15, color=color, zorder=2)
-    
-    # Plot novel algorithm with enhanced model
-    if 'PerformativeMFMARL' in results_novel_enhanced:
-        results = results_novel_enhanced['PerformativeMFMARL']
-        color = colors.get('PerformativeMFMARL', 'red')
-        ax2.plot(episodes, results['rewards'], '-', alpha=0.08, linewidth=0.3, color=color, zorder=1)
-        smoothed = compute_moving_average(results['rewards'], window_size)
-        ax2.plot(episodes, smoothed, '--', linewidth=3.5, label='PerformativeMFMARL',
-                color=color, zorder=3)
-        
-        std_window = window_size
-        std_values = []
-        for i in range(len(results['rewards'])):
-            start_idx = max(0, i - std_window // 2)
-            end_idx = min(len(results['rewards']), i + std_window // 2 + 1)
-            std_values.append(np.std(results['rewards'][start_idx:end_idx]))
-        std_values = np.array(std_values)
-        ax2.fill_between(episodes, smoothed - std_values, smoothed + std_values, 
-                        alpha=0.15, color=color, zorder=2)
-    
-    ax2.set_xlabel('Episode', fontsize=13, fontweight='bold')
-    ax2.set_ylabel('Episode Reward', fontsize=13, fontweight='bold')
-    ax2.set_title('Reward Convergence Comparison', fontsize=15, fontweight='bold')
-    ax2.legend(fontsize=11, loc='lower right', framealpha=0.9)
-    ax2.grid(True, alpha=0.4, linestyle='--', linewidth=0.8)
-    
-    plt.tight_layout()
-    plt.savefig('rl_models_convergence_comparison.png', dpi=200, bbox_inches='tight')
-    print("✓ Saved RL models convergence comparison to 'rl_models_convergence_comparison.png'")
-    plt.close('all')
+    """Convergence comparison — smooth lines only, no raw traces, no variance bands."""
+    # Okabe-Ito colorblind-safe palette (consistent with publication_marl_plots.py)
+    _OKI = ["#0072B2", "#D55E00", "#009E73", "#CC79A7",
+            "#E69F00", "#56B4E9", "#F0E442", "#000000"]
+    proposed_names = {"PerformativeMFMARL", "PerformativeMARL"}
+
+    # Merge both dicts into a single ordered dict
+    all_results: dict = {}
+    for name, res in results_dict_regular.items():
+        all_results[name] = res
+    for name, res in results_novel_enhanced.items():
+        all_results[name] = res
+
+    ordered = list(all_results.keys())
+    colors = {name: _OKI[i % len(_OKI)] for i, name in enumerate(ordered)}
+
+    episodes = np.arange(1, num_episodes + 1, dtype=np.float64)
+    window_size = max(50, int(num_episodes * 0.15))  # 15 % — smooth without flattening
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+    ax1, ax2 = axes
+
+    for name in ordered:
+        res = all_results[name]
+        color = colors[name]
+        lw = 2.6 if name in proposed_names else 1.8
+        is_proposed = name in proposed_names
+
+        tp_gbps = np.array(res['throughputs'], dtype=np.float64) / 1e9
+        sm_tp = compute_moving_average(tp_gbps, window_size)
+        ax1.plot(episodes, sm_tp, '-', linewidth=lw, label=name, color=color,
+                 zorder=3 if is_proposed else 2)
+
+        rw = np.array(res['rewards'], dtype=np.float64)
+        sm_rw = compute_moving_average(rw, window_size)
+        ax2.plot(episodes, sm_rw, '-', linewidth=lw, label=name, color=color,
+                 zorder=3 if is_proposed else 2)
+
+    for ax, ylabel, title in [
+        (ax1, 'Episode aggregate throughput (Gbit/s)', 'Throughput convergence'),
+        (ax2, 'Rewards', 'Rewards convergence'),
+    ]:
+        ax.set_xlim(1, num_episodes)
+        ax.set_xlabel('Training episodes', fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.set_title(title, fontsize=12)
+        ax.legend(fontsize=8, loc='best', framealpha=0.9, frameon=True,
+                  fancybox=False, edgecolor='0.4',
+                  ncol=1 if len(ordered) <= 6 else 2)
+        ax.grid(True, alpha=0.35, linestyle='--', linewidth=0.6)
+
+    fig.savefig('rl_models_convergence_comparison.png', dpi=300, bbox_inches='tight')
+    print("Saved rl_models_convergence_comparison.png")
+    plt.close(fig)
 
 # ===================== SWEEPS + 3-GRAPH PLOTTING =====================
 

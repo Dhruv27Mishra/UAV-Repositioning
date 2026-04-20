@@ -20,7 +20,7 @@ def jains_fairness(user_rates):
     return numerator / denominator if denominator != 0 else 0
 
 
-def train(num_episodes=1000, num_uavs=7, grid_size=(10, 10, 5),
+def train(num_episodes=2000, num_uavs=7, grid_size=(10, 10, 5),
           learning_rate_actor=0.001, learning_rate_critic=0.001, gamma=0.99,
           tau=0.01, save_interval=50, buffer_size=10000, batch_size=64):
     """Train MADDPG agents."""

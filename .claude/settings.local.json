@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ':*)",
+      "Bash(python -c ' *)",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/Python/bin/python3.exe\" -m pip install torch --force-reinstall --index-url https://download.pytorch.org/whl/cu124)",
+      "Bash(where conda *)",
+      "Read(//c/Users/hkotapati9784/anaconda3/Scripts/**)",
+      "Read(//c/ProgramData/anaconda3/Scripts/**)",
+      "Read(//c/Users/hkotapati9784/miniconda3/Scripts/**)",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/miniconda3/Scripts/conda.exe\" create *)",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/miniconda3/Scripts/conda.exe\" tos *)",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/miniconda3/envs/uav/python.exe\" -m pip install torch --index-url https://download.pytorch.org/whl/cu124)",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/miniconda3/envs/uav/python.exe\" -m pip install -r \"C:/Users/hkotapati9784/UAV-Repositioning/requirements.txt\")",
+      "Bash(\"C:/Users/hkotapati9784/AppData/Local/miniconda3/envs/uav/python.exe\" -c \"import torch; print\\('CUDA:', torch.cuda.is_available\\(\\)\\); print\\('GPU:', torch.cuda.get_device_name\\(0\\) if torch.cuda.is_available\\(\\) else 'N/A'\\)\")"
+    ]
+  }
+}

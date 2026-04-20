@@ -120,7 +120,6 @@ def _plot_one_metric(
     smoothing_window: int,
     colors: Dict[str, str],
     n_curves: int,
-    faint_alpha: float = 0.12,
 ) -> None:
     ylabel_final = ylabel
     for name in ordered_names:
@@ -133,7 +132,6 @@ def _plot_one_metric(
         lw = 2.4 if is_prop else 1.6
         z = 3 if is_prop else 2
         ls = "-" if is_prop else "-"
-        ax.plot(episodes, y_plot, color=color, alpha=faint_alpha, linewidth=0.35, zorder=1)
         sm = _smooth(y_plot, smoothing_window)
         label = name.replace("_", " ")
         ax.plot(
@@ -191,7 +189,7 @@ def plot_convergence_publication(
     """
     apply_publication_style()
     if smoothing_window is None:
-        smoothing_window = max(11, min(151, max(5, num_episodes // 25)))
+        smoothing_window = max(50, int(num_episodes * 0.15))  # 15 % of episodes
 
     # Episode count on axis: 1 .. N (not 0 .. N-1)
     episodes = np.arange(1, num_episodes + 1, dtype=np.float64)

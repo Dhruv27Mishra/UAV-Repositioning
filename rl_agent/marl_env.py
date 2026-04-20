@@ -28,8 +28,7 @@ Signal-map observations (optional):
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import torch
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Optional, Union
 import matplotlib.pyplot as plt
 
 class MARLEnv(gym.Env):
@@ -37,7 +36,7 @@ class MARLEnv(gym.Env):
                  num_uavs: int = 3,
                  num_users: int = 20,
                  grid_size: Tuple[int, int, int] = (10, 10, 5),
-                 device: torch.device = None,
+                 device: Optional[Union[str, "torch.device"]] = None,
                  min_user_rate: float = 0.5,
                  qos_bonus: float = 10.0,
                  ue_height_range: Tuple[float, float] = (0.0, 5.0),
@@ -49,12 +48,19 @@ class MARLEnv(gym.Env):
                  spread_bonus: float = 0.0,
                  use_occupancy_performative: bool = False,
                  enable_occupancy_obs: bool = False,
-                 occupancy_performative_weight: float = 0.35):
+                 occupancy_performative_weight: float = 0.35,
+                 traffic_model: str = 'constant',
+                 pareto_shape: float = 1.5,
+                 pareto_scale: float = 1.0,
+                 traffic_load: float = 1.0,
+                 low_velocity_max: float = 1.0,
+                 high_velocity_min: float = 5.0):
         super(MARLEnv, self).__init__()
         self.num_uavs = num_uavs
         self.num_users = num_users
         self.grid_size = grid_size
-        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        import torch
+        self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.min_user_rate = min_user_rate
         self.qos_bonus = qos_bonus
         # NEW: UE heights in [0, 5] m (configurable)
@@ -74,6 +80,15 @@ class MARLEnv(gym.Env):
         self.occupancy_performative_weight = float(
             np.clip(occupancy_performative_weight, 0.0, 1.0)
         )
+        # VBR Traffic model parameters
+        self.traffic_model = traffic_model          # 'constant' or 'pareto'
+        self.pareto_shape = float(pareto_shape)     # Pareto shape (tail heaviness)
+        self.pareto_scale = float(pareto_scale)     # Mean demand per user (Mbps)
+        self.traffic_load = float(traffic_load)     # Overall load multiplier
+        # Velocity categories: LOW (v < low_velocity_max), HIGH (v >= high_velocity_min)
+        # Users with low_velocity_max <= v < high_velocity_min → MEDIUM (excluded from per-cat PDR)
+        self.low_velocity_max  = float(low_velocity_max)   # default 1 m/s
+        self.high_velocity_min = float(high_velocity_min)  # default 5 m/s
         self.episode_count = 0  # Track episodes for non-stationary drift
         self.step_count = 0  # Track steps for gradual changes
         
@@ -258,16 +273,19 @@ class MARLEnv(gym.Env):
                 self.num_users
             )
         
-        # Initialize user velocities and categories (POINT 2: UE velocity considerations)
+        # Initialize user velocities and categories
+        # LOW: v < low_velocity_max (1 m/s)
+        # HIGH: v >= high_velocity_min (5 m/s)
+        # MEDIUM: in between (excluded from per-category PDR)
         self.init_user_velocities = np.random.uniform(0, 30, self.num_users)  # 0-30 m/s
         self.init_user_velocity_categories = []
         for v in self.init_user_velocities:
-            if v < 5:
-                self.init_user_velocity_categories.append('LOW_MOBILITY')
-            elif v < 15:
-                self.init_user_velocity_categories.append('MEDIUM_MOBILITY')
+            if v < self.low_velocity_max:
+                self.init_user_velocity_categories.append('LOW')
+            elif v >= self.high_velocity_min:
+                self.init_user_velocity_categories.append('HIGH')
             else:
-                self.init_user_velocity_categories.append('HIGH_MOBILITY')
+                self.init_user_velocity_categories.append('MEDIUM')
         
         # Copy initial positions to current positions
         self.uav_positions = self.init_uav_positions.copy()
@@ -518,13 +536,16 @@ class MARLEnv(gym.Env):
             mean_uav_ground_dist = 0.0
         
         uav_user_rates = [[] for _ in range(self.num_uavs)]
-        
+        per_user_served_rates = np.zeros(self.num_users)
+
         for j in range(self.num_users):
             uav_idx = best_uav_indices[j]
             uav_user_rates[uav_idx].append(rates[uav_idx, j])
-        
+            per_user_served_rates[j] = rates[uav_idx, j]
+
         # Apply non-stationary traffic demand multiplier
         traffic_multiplier = self.base_traffic_demand if self.enable_non_stationary else 1.0
+        per_user_served_rates *= traffic_multiplier
         
         # Calculate total throughput and fairness
         total_throughput = 0.0
@@ -579,7 +600,28 @@ class MARLEnv(gym.Env):
         e_hover = self.num_uavs * self._hover_power_per_uav_w * dt
         e_prop = self._propulsion_j_per_m * self._step_total_displacement
         step_energy_j = float(e_comm + e_hover + e_prop)
-        
+        energy_efficiency_mbitpj = float(total_throughput / 1e6) / (step_energy_j + 1e-9)
+
+        # ---- VBR Traffic Demand and Packet Drop Rate ----
+        if self.traffic_model == 'pareto':
+            # Pareto-distributed per-user demand; (pareto(a)+1) shifts minimum to 1
+            raw = np.random.pareto(self.pareto_shape, self.num_users)
+            user_demands_bps = self.pareto_scale * 1e6 * (raw + 1.0) * self.traffic_load
+        else:
+            user_demands_bps = np.full(
+                self.num_users, self.pareto_scale * 1e6 * self.traffic_load
+            )
+
+        dropped_bps = np.maximum(0.0, user_demands_bps - per_user_served_rates)
+        total_demand = float(np.sum(user_demands_bps))
+        packet_drop_rate = float(np.sum(dropped_bps) / (total_demand + 1e-9))
+
+        low_mask  = np.array([v <  self.low_velocity_max  for v in self.user_velocities])
+        high_mask = np.array([v >= self.high_velocity_min for v in self.user_velocities])
+        # MEDIUM users (1 ≤ v < 5 m/s) are excluded from per-category PDR
+        pdr_low  = float(np.sum(dropped_bps[low_mask])  / (np.sum(user_demands_bps[low_mask])  + 1e-9))
+        pdr_high = float(np.sum(dropped_bps[high_mask]) / (np.sum(user_demands_bps[high_mask]) + 1e-9))
+
         info = {
             'throughput': float(total_throughput),
             'fairness': float(fairness),
@@ -598,8 +640,12 @@ class MARLEnv(gym.Env):
             'total_movement': float(self._step_total_displacement),
             'mean_uav_distance': mean_uav_ground_dist,
             'step_energy_j': step_energy_j,
+            'energy_efficiency_mbitpj': energy_efficiency_mbitpj,
+            'packet_drop_rate': packet_drop_rate,
+            'packet_drop_rate_low': pdr_low,
+            'packet_drop_rate_high': pdr_high,
         }
-        
+
         return float(reward), info
 
     def render(self):
@@ -653,14 +699,14 @@ class MARLEnv(gym.Env):
                 else:
                     self.ue_direction_vectors[j] = np.array([0.0, 0.0])
             
-            # Occasionally update velocity category
-            if np.random.rand() < 0.01:  # 1% chance per step
-                if self.user_velocities[j] < 5:
-                    self.user_velocity_categories[j] = 'LOW_MOBILITY'
-                elif self.user_velocities[j] < 15:
-                    self.user_velocity_categories[j] = 'MEDIUM_MOBILITY'
+            # Update velocity category
+            v = self.user_velocities[j]
+            if v < self.low_velocity_max:
+                self.user_velocity_categories[j] = 'LOW'
+            elif v >= self.high_velocity_min:
+                self.user_velocity_categories[j] = 'HIGH'
             else:
-                    self.user_velocity_categories[j] = 'HIGH_MOBILITY'
+                self.user_velocity_categories[j] = 'MEDIUM'
         
         # Update mobility history for non-stationarity tracking (Type a)
         if self.enable_non_stationary:

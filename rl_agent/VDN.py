@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import random
 from collections import deque
 from typing import List, Tuple
 from rl_agent.IQL import QNetwork, ReplayBuffer
@@ -124,7 +123,7 @@ class VDN:
     
     def load(self, path: str) -> None:
         """Load model checkpoints."""
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, weights_only=False)
         for i, state_dict in enumerate(checkpoint['q_networks']):
             self.q_networks[i].load_state_dict(state_dict)
         for i, state_dict in enumerate(checkpoint['target_q_networks']):
