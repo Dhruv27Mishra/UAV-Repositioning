@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """
-Correct Academic Workflow  (Professor's Instructions)
-======================================================
 STEP 1 — TRAIN:
     Train each algorithm for 2000 episodes on the base environment.
     Save the final neural-network weights (.pt files).
@@ -17,13 +15,6 @@ STEP 2 — EVALUATE:
 STEP 3 — G6/G7 TRAINING CURVES:
     Record per-episode throughput during training (2000 episodes × 5 seeds).
     Smooth with moving average + spline in the plot script.
-
-Usage:
-    python scripts/run_journal_experiments.py            # full run
-    python scripts/run_journal_experiments.py --quick    # smoke-test
-    python scripts/run_journal_experiments.py --only g1  # one experiment
-    python scripts/run_journal_experiments.py --step train   # training only
-    python scripts/run_journal_experiments.py --step eval    # eval only
 """
 from __future__ import annotations
 
