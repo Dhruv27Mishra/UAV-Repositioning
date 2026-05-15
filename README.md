@@ -6,7 +6,7 @@
 ## 📄 Paper Summary
 
 **📝 Title:** Optimizing Throughput in Wi-Fi enabled UAV Network using Multi-agent Reinforcement Learning  
-**👥 Authors:** Parshav Pagaria, Dhruv Mishra, Souvik Deb, Santosh Nagraj, Mahasweta Sarkar, Shankar K. Ghosh  
+**👥 Authors:** Parshav Pagaria, Dhruv Mishra, Haripriya Kotapati, Souvik Deb, Santosh Nagraj, Mahasweta Sarkar, Shankar K. Ghosh  
 **🏛️ Affiliations:**  
 - San Diego State University, USA  
 - Shiv Nadar Institution of Eminence, India  
