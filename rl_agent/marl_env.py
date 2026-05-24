@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 
 class MARLEnv(gym.Env):
     def __init__(self,
-                 num_uavs: int = 3,
+                 num_uavs: int = 7,
                  num_users: int = 20,
                  grid_size: Tuple[int, int, int] = (10, 10, 5),
                  device: Optional[Union[str, "torch.device"]] = None,

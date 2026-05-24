@@ -70,7 +70,7 @@ from rl_agent.MAPPO             import MAPPO
 from publication_marl_plots  import apply_publication_style
 
 # ─────────────────────────── configuration ──────────────────────────────────
-NUM_UAVS   = 3
+NUM_UAVS   = 7
 NUM_USERS  = 15
 GRID_SIZE  = (10, 10, 5)
 EPISODES   = 2000
