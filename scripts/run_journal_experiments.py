@@ -34,14 +34,13 @@ ADAPTIVE_FAMILY = frozenset({"PerformativeMFMARL", "PerformativeMARL"})
 QMIX_FAMILY     = frozenset({"QMIX", "ABQMIX"})
 
 # ── evaluation x-axis values ──────────────────────────────────────────────────
-GAMMAS             = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
-CALL_RATES         = [5, 10, 15, 25, 35, 50]
-VELOCITIES         = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0]
-TRAFFIC_LOADS      = [10, 25, 50, 75, 100, 125, 150]
-EVAL_NUM_UES       = [5, 10, 15, 20, 25, 30, 40, 50]   # UE-count sweep (new plots)
+CALL_RATES         = [100,200,300,400,500,600,700,800,900,1000]  # calls/sec (for G2/G3/G_PDR_ARR)
+EVAL_NUM_UES       = [50, 100, 150, 200, 250]                  # UE-count sweep (new plots)
+NUM_UAVS_SWEEP     = [1, 2, 3, 4, 5, 6, 7, 8, 9]      # UAV-count sweep for EE vs UAVs
+GAMMAS             = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]  # discount-factor sweep
 # QoS SINR threshold sweep (dB) — converted to min_user_rate via Shannon capacity
 # R_min = B·log2(1 + 10^(γ_dB/10)),  B = 10 MHz (matches marl_env.py bandwidth)
-SINR_THRESHOLDS_DB = [-20, -15, -10, -5, 0, 5, 10]
+SINR_THRESHOLDS_DB = [-5, 0, 5, 10, 15, 20, 25, 30, 35, 40]
 _BANDWIDTH_HZ      = 10e6   # must match MARLEnv.bandwidth
 
 # ── training randomisation pools ─────────────────────────────────────────────
@@ -50,14 +49,14 @@ TRAIN_VELOCITIES    = [0.5, 1.0, 3.0, 5.0, 8.0, 10.0]
 TRAIN_TRAFFIC_LOADS = [0.4, 0.6, 0.8, 1.0, 1.2, 1.5]
 
 # ── environment defaults ──────────────────────────────────────────────────────
-NUM_UAVS     = 3
+NUM_UAVS     = 7
 NUM_USERS    = 20
-GRID_SIZE    = (10, 10, 5)
-STEPS_PER_EP = 50
+GRID_SIZE    = (100, 100, 5)
+STEPS_PER_EP = 100
 LOW_VEL_MAX  = 1.0
 HIGH_VEL_MIN = 5.0
 
-TRAIN_EPISODES    = 2000
+TRAIN_EPISODES    = 3000
 EVAL_RUNS         = 500
 N_SEEDS           = 5
 
@@ -88,6 +87,19 @@ def _base_model_path(algo: str, seed: int) -> str:
     return os.path.join(MODELS_DIR, f"{algo.lower()}_seed{seed}_final.pt")
 
 
+def _gamma_model_path(algo: str, seed: int, gamma: float) -> str:
+    """models/{algo_lower}_g{gamma}_seed{s}_final.pt — for gamma-sweep training."""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    g_str = f"{gamma}".replace(".", "p")
+    return os.path.join(MODELS_DIR, f"{algo.lower()}_g{g_str}_seed{seed}_final.pt")
+
+
+def _uav_model_path(algo: str, seed: int, n_uav: int) -> str:
+    """models/{algo_lower}_uav{n}_seed{s}_final.pt — for UAV-count sweep."""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    return os.path.join(MODELS_DIR, f"{algo.lower()}_uav{n_uav}_seed{seed}_final.pt")
+
+
 
 
 # ─── environment factories ────────────────────────────────────────────────────
@@ -95,6 +107,7 @@ def _base_model_path(algo: str, seed: int) -> str:
 def make_env(
     device: torch.device,
     *,
+    num_uavs:          int   = NUM_UAVS,
     num_users:         int   = NUM_USERS,
     traffic_model:     str   = "pareto",
     pareto_shape:      float = 1.5,
@@ -104,9 +117,10 @@ def make_env(
     high_velocity_min: float = HIGH_VEL_MIN,
     enhanced:          bool  = False,
     min_user_rate:     float = 0.5,   # Mbps — QoS threshold swept in goodness-vs-SINR
+    sinr_threshold_db: float = -5.0,  # SINR outage threshold (dB)
 ) -> MARLEnv:
     return MARLEnv(
-        num_uavs=NUM_UAVS, num_users=num_users, grid_size=GRID_SIZE,
+        num_uavs=num_uavs, num_users=num_users, grid_size=GRID_SIZE,
         device=device, min_user_rate=min_user_rate, qos_bonus=10.0,
         enable_non_stationary=enhanced, enable_performative=enhanced,
         enable_signal_map_obs=True,
@@ -114,6 +128,7 @@ def make_env(
         pareto_scale=pareto_scale, traffic_load=traffic_load,
         low_velocity_max=low_velocity_max,
         high_velocity_min=high_velocity_min,
+        sinr_threshold_db=sinr_threshold_db,
     )
 
 
@@ -121,21 +136,11 @@ def _is_enhanced(algo: str) -> bool:
     return algo in ENHANCED_ALGOS
 
 
-def _make_env_for(algo: str, device: torch.device, **kwargs) -> MARLEnv:
-    return make_env(device, enhanced=_is_enhanced(algo), **kwargs)
+def _make_env_for(algo: str, device: torch.device, num_uavs: int = NUM_UAVS, **kwargs) -> MARLEnv:
+    return make_env(device, num_uavs=num_uavs, enhanced=_is_enhanced(algo), **kwargs)
 
 
 # ─── velocity helpers ─────────────────────────────────────────────────────────
-
-def _set_velocity_split(env: MARLEnv, seed: int) -> None:
-    rng  = np.random.default_rng(seed)
-    n    = env.num_users
-    n_lo = n // 2
-    env.user_velocities[:n_lo] = rng.uniform(0.1, LOW_VEL_MAX * 0.95, n_lo)
-    env.user_velocities[n_lo:] = rng.uniform(HIGH_VEL_MIN * 1.05,
-                                              HIGH_VEL_MIN * 2.0, n - n_lo)
-    env.user_velocity_categories = ["LOW"] * n_lo + ["HIGH"] * (n - n_lo)
-
 
 def _set_all_velocity(env: MARLEnv, v: float, seed: int) -> None:
     rng  = np.random.default_rng(seed)
@@ -240,7 +245,7 @@ def _run_episode(
     num_uavs = env.num_uavs
     done     = False
 
-    ep_reward = ep_tp = ep_ho = ep_ej = ep_pdr = ep_goodness = 0.0
+    ep_reward = ep_tp = ep_ho = ep_ej = ep_ej_rf = ep_pdr = ep_goodness = 0.0
     ep_tp_lo  = ep_tp_hi = 0.0
     steps     = 0
 
@@ -266,7 +271,7 @@ def _run_episode(
         elif name == "MADDPG":
             actions = [agent.get_action(obs_t[i * sdim:(i + 1) * sdim],
                                         i, explore=explore)
-                       for i in range(num_uavs)]
+                       for i in range(num_uavs)] 
             lps = [0.0] * num_uavs; ab_j = None
         else:
             actions = [agent.get_action(obs_t[i * sdim:(i + 1) * sdim], i)
@@ -276,12 +281,13 @@ def _run_episode(
         next_obs, reward, term, trunc, info = env.step(actions)
         done = term or trunc
 
-        ep_reward += reward
-        ep_tp     += float(info.get("throughput",       0.0))
-        ep_ho     += int  (info.get("handovers",        0))
-        ep_ej     += float(info.get("step_energy_j",    0.0))
-        ep_pdr     += float(info.get("packet_drop_rate", 0.0))
-        ep_goodness += float(info.get("goodness",        0.0))
+        ep_reward   += reward
+        ep_tp       += float(info.get("throughput",        0.0))
+        ep_ho       += int  (info.get("handovers",         0))
+        ep_ej       += float(info.get("step_energy_j",     0.0))
+        ep_ej_rf    += float(info.get("energy_rf_move_j",  0.0))
+        ep_pdr      += float(info.get("packet_drop_rate",  0.0))
+        ep_goodness += float(info.get("goodness",          0.0))
 
         if track_mobility_tp:
             ur = info.get("user_rates", None)
@@ -332,32 +338,39 @@ def _run_episode(
         agent.end_episode()
     env.end_episode()
 
-    n  = max(steps, 1)
-    ee = (ep_tp / 1e6) / (ep_ej + 1e-9)
+    n      = max(steps, 1)
+    tp_mb  = ep_tp / 1e6
+    # EE_full  = Throughput (Mbit) / (P_tx·Δt + P_hover·Δt + ξ·d)
+    ee         = tp_mb / (ep_ej    + 1e-9)
+    # EE_rf_move = Throughput (Mbit) / (P_tx·Δt + ξ·d)  — excludes constant hover
+    ee_rf_move = tp_mb / (ep_ej_rf + 1e-9)
     return {
-        "reward":       ep_reward,
-        "throughput":   ep_tp      / n,
-        "handovers":    ep_ho,
-        "energy_eff":   ee,
-        "pdr":          ep_pdr     / n * 100.0,
-        "goodness":     ep_goodness / n,
-        "tp_low_gbps":  ep_tp_lo   / n / 1e9,
-        "tp_high_gbps": ep_tp_hi   / n / 1e9,
+        "reward":          ep_reward,
+        "throughput":      ep_tp        / n,
+        "handovers":       ep_ho,
+        "energy_eff":      ee,
+        "energy_eff_rf":   ee_rf_move,
+        "pdr":             ep_pdr       / n * 100.0,
+        "goodness":        ep_goodness  / n,
+        "tp_low_gbps":     ep_tp_lo     / n / 1e9,
+        "tp_high_gbps":    ep_tp_hi     / n / 1e9,
     }
 
 
 # ─── STEP 1: train one algorithm, vary conditions each episode ────────────────
 
 def train_and_save(
-    algo:       str,
-    device:     torch.device,
-    seed:       int,
-    gamma:      float,
-    model_path: str,
-    n_train:    int,
+    algo:          str,
+    device:        torch.device,
+    seed:          int,
+    gamma:         float,
+    model_path:    str,
+    n_train:       int,
+    pretrain_path: str = None,
 ) -> None:
     """
     Train algo for n_train episodes with randomised UEs/velocity/traffic.
+    If pretrain_path is given, loads those weights before training (fine-tune).
     Save weights to model_path.
     """
     env   = _make_env_for(algo, device)
@@ -365,6 +378,12 @@ def train_and_save(
     agent = create_agent(algo, env, device, gamma=gamma, seed=seed)
     sdim  = getattr(env, "agent_obs_dim",
                     env.observation_space.shape[0] // env.num_uavs)
+    if pretrain_path and os.path.isfile(pretrain_path) and hasattr(agent, "load"):
+        try:
+            agent.load(pretrain_path)
+            print(f"    Loaded pretrained weights from {os.path.basename(pretrain_path)}")
+        except Exception as e:
+            print(f"  [warn] pretrain load failed: {e}")
     rng   = np.random.default_rng(seed + 12345)
     gstep = 0
 
@@ -390,15 +409,20 @@ def train_and_save(
 
 # ─── STEP 1 (full): train all algorithms, all seeds ──────────────────────────
 
-def train_all(device: torch.device, n_train: int, n_seed: int) -> None:
+def train_all(device: torch.device, n_train: int, n_seed: int,
+              algo_filter: List[str] = None) -> None:
     """
     Train every algorithm n_seed times.
     Skip any seed whose model file already exists.
+    algo_filter: if given, only train these algorithms (for parallel batching).
     """
+    algos = algo_filter if algo_filter else ALGO_NAMES
     print("\n" + "="*60)
-    print("STEP 1 — TRAINING ALL ALGORITHMS")
+    print(f"STEP 1 — TRAINING: {', '.join(algos)}")
     print("="*60)
-    for algo in tqdm(ALGO_NAMES, desc="Algorithms"):
+    for algo in tqdm(algos, desc="Algorithms"):
+        if algo not in ALGO_NAMES:
+            print(f"  [warn] unknown algo '{algo}', skipping"); continue
         env_type = "enhanced" if _is_enhanced(algo) else "regular"
         print(f"\n[{algo}]  env={env_type}  episodes={n_train}  seeds={n_seed}")
         for seed in range(n_seed):
@@ -477,329 +501,81 @@ def _evaluate(
     return {k: float(np.mean(accum[k])) for k in metric_keys}
 
 
-# ─── G1: Energy Efficiency vs Discount Factor ─────────────────────────────────
-# Uses base trained models — evaluates energy efficiency at each gamma value.
-
-def run_g1(device: torch.device, quick: bool) -> Dict:
-    print("\n=== G1: Energy Efficiency vs Discount Factor ===")
-    n_eval  = EVAL_RUNS_QUICK      if quick else EVAL_RUNS
-    n_seed  = N_SEEDS_QUICK        if quick else N_SEEDS
-
-    data: Dict = {"gammas": GAMMAS}
-    for algo in tqdm(ALGO_NAMES, desc="G1 algos"):
-        means, stds = [], []
-        for g in tqdm(GAMMAS, desc=f"  {algo} gamma sweep", leave=False):
-            seed_vals = []
-            for seed in range(n_seed):
-                mp = _base_model_path(algo, seed)
-
-                def _ef():
-                    return _make_env_for(algo, device, traffic_load=1.0)
-
-                print(f"  [EVAL]  {algo} gamma={g} seed={seed} ({n_eval} runs)")
-                res = _evaluate(algo, device, seed, g, mp, n_eval, _ef,
-                                metric_keys=["energy_eff"])
-                seed_vals.append(res["energy_eff"])
-
-            means.append(float(np.mean(seed_vals)))
-            stds.append(float(np.std(seed_vals)))
-        data[algo] = {"mean": means, "std": stds}
-    return data
-
-
-# ─── G2 & G3: Handover Rate & Energy Efficiency vs Call Arrival Rate ──────────
-
-def run_g2g3(device: torch.device, quick: bool) -> Dict:
-    print("\n=== G2/G3: Handover Rate & Energy Efficiency vs Call Arrival Rate ===")
-    n_eval  = EVAL_RUNS_QUICK if quick else EVAL_RUNS
-    n_seed  = N_SEEDS_QUICK   if quick else N_SEEDS
-    max_r   = float(max(CALL_RATES))
-
-    data: Dict = {"call_rates": CALL_RATES}
-    for algo in tqdm(ALGO_NAMES, desc="G2G3 algos"):
-        ho_m, ho_s, ee_m, ee_s = [], [], [], []
-        for rate in tqdm(CALL_RATES, desc=f"  {algo} eval", leave=False):
-            tload = rate / max_r
-
-            def _ef(tload=tload):
-                return _make_env_for(algo, device, traffic_load=tload)
-
-            ho_sv, ee_sv = [], []
-            for seed in range(n_seed):
-                mp = _base_model_path(algo, seed)
-                print(f"  [EVAL]  {algo} rate={rate} seed={seed} ({n_eval} runs)")
-                res = _evaluate(algo, device, seed, 0.99, mp, n_eval, _ef,
-                                metric_keys=["handovers", "energy_eff"])
-                ho_sv.append(res["handovers"])
-                ee_sv.append(res["energy_eff"])
-
-            ho_m.append(float(np.mean(ho_sv))); ho_s.append(float(np.std(ho_sv)))
-            ee_m.append(float(np.mean(ee_sv))); ee_s.append(float(np.std(ee_sv)))
-
-        data[algo] = {"ho_mean": ho_m, "ho_std": ho_s,
-                      "ee_mean": ee_m, "ee_std": ee_s}
-    return data
-
-
-# ─── G4: Packet Drop Rate vs User Velocity ────────────────────────────────────
-
-def run_g4(device: torch.device, quick: bool) -> Dict:
-    print("\n=== G4: Packet Drop Rate vs User Velocity ===")
-    n_eval = EVAL_RUNS_QUICK if quick else EVAL_RUNS
-    n_seed = N_SEEDS_QUICK   if quick else N_SEEDS
-
-    data: Dict = {"velocities": VELOCITIES}
-    for algo in tqdm(ALGO_NAMES, desc="G4 algos"):
-        pdr_m, pdr_s = [], []
-        for v in tqdm(VELOCITIES, desc=f"  {algo} eval", leave=False):
-
-            def _ef(v=v):
-                return _make_env_for(algo, device, traffic_load=0.8,
-                                     low_velocity_max=v, high_velocity_min=v)
-
-            def _post(env, run, v=v):
-                _set_all_velocity(env, v, run)
-
-            pdr_sv = []
-            for seed in range(n_seed):
-                mp = _base_model_path(algo, seed)
-                print(f"  [EVAL]  {algo} vel={v} seed={seed} ({n_eval} runs)")
-                res = _evaluate(algo, device, seed, 0.99, mp, n_eval, _ef,
-                                metric_keys=["pdr"], post_reset_fn=_post)
-                pdr_sv.append(res["pdr"])
-
-            pdr_m.append(float(np.mean(pdr_sv)))
-            pdr_s.append(float(np.std(pdr_sv)))
-        data[algo] = {"pdr_mean": pdr_m, "pdr_std": pdr_s}
-    return data
-
-
-# ─── G5: Packet Drop Rate vs Traffic Load ─────────────────────────────────────
-
-def run_g5(device: torch.device, quick: bool) -> Dict:
-    print("\n=== G5: Packet Drop Rate vs Traffic Load ===")
-    n_eval = EVAL_RUNS_QUICK if quick else EVAL_RUNS
-    n_seed = N_SEEDS_QUICK   if quick else N_SEEDS
-    max_l  = float(max(TRAFFIC_LOADS))
-
-    data: Dict = {"traffic_loads_mbps": TRAFFIC_LOADS}
-    for algo in tqdm(ALGO_NAMES, desc="G5 algos"):
-        pdr_m, pdr_s = [], []
-        for tmbps in tqdm(TRAFFIC_LOADS, desc=f"  {algo} eval", leave=False):
-            tload = tmbps / max_l
-
-            def _ef(tload=tload):
-                return _make_env_for(algo, device, traffic_load=tload)
-
-            pdr_sv = []
-            for seed in range(n_seed):
-                mp = _base_model_path(algo, seed)
-                print(f"  [EVAL]  {algo} load={tmbps} seed={seed} ({n_eval} runs)")
-                res = _evaluate(algo, device, seed, 0.99, mp, n_eval, _ef,
-                                metric_keys=["pdr"])
-                pdr_sv.append(res["pdr"])
-
-            pdr_m.append(float(np.mean(pdr_sv)))
-            pdr_s.append(float(np.std(pdr_sv)))
-        data[algo] = {"pdr_mean": pdr_m, "pdr_std": pdr_s}
-    return data
-
-
-# ─── G6 & G7: Convergence Curves (LOW vs HIGH mobility) ──────────────────────
-# Records per-episode throughput during a dedicated training run with a fixed
-# LOW/HIGH velocity split so both groups can be tracked separately.
-# Also randomises num_users and traffic_load for robustness.
-
-def run_g6g7(device: torch.device, quick: bool) -> Dict:
-    print("\n=== G6/G7: Throughput Convergence by Mobility Group ===")
-    n_ep   = TRAIN_EPISODES_QUICK if quick else TRAIN_EPISODES
-    n_seed = N_SEEDS_QUICK        if quick else N_SEEDS
-
-    data: Dict = {"num_episodes": n_ep}
-    for algo in tqdm(ALGO_NAMES, desc="G6G7 algos"):
-        seeds_low:  List[List[float]] = []
-        seeds_high: List[List[float]] = []
-
-        for seed in tqdm(range(n_seed), desc=f"  {algo}", leave=False):
-            rng = np.random.default_rng(seed + 77777)
-
-            env   = _make_env_for(algo, device, traffic_load=1.0)
-            env.reset(seed=seed)
-            _set_velocity_split(env, seed)
-
-            agent = create_agent(algo, env, device, gamma=0.99, seed=seed)
-            sdim  = getattr(env, "agent_obs_dim",
-                            env.observation_space.shape[0] // env.num_uavs)
-            gstep = 0
-            ep_lo: List[float] = []
-            ep_hi: List[float] = []
-
-            for ep_idx in range(n_ep):
-                env.num_users    = int(rng.choice(TRAIN_UE_COUNTS))
-                env.traffic_load = float(rng.choice(TRAIN_TRAFFIC_LOADS))
-
-                obs, _ = env.reset()
-                _set_velocity_split(env, seed * 100000 + ep_idx)
-                obs_t = torch.tensor(obs, device=device, dtype=torch.float32)
-                done  = False
-                accum_lo = accum_hi = 0.0
-                steps = 0
-
-                if algo == "ABQMIX":
-                    agent.start_episode()
-
-                while not done and steps < STEPS_PER_EP:
-                    obs_np = [obs_t[i * sdim:(i + 1) * sdim].cpu().numpy()
-                              for i in range(env.num_uavs)]
-
-                    if algo == "ABQMIX":
-                        ab_j    = agent.get_actions(obs_np)
-                        actions = [p[0] for p in ab_j]
-                    elif algo == "DMTD":
-                        actions = agent.get_actions(obs_np); ab_j = None
-                    elif algo in ADAPTIVE_FAMILY:
-                        actions = [agent.get_action(obs_t[i*sdim:(i+1)*sdim],
-                                                    i, global_state=obs_t)
-                                   for i in range(env.num_uavs)]
-                        ab_j = None
-                    elif algo == "MADDPG":
-                        actions = [agent.get_action(
-                            obs_t[i*sdim:(i+1)*sdim], i, explore=True)
-                            for i in range(env.num_uavs)]
-                        ab_j = None
-                    else:
-                        actions = [agent.get_action(obs_t[i*sdim:(i+1)*sdim], i)
-                                   for i in range(env.num_uavs)]
-                        ab_j = None
-
-                    next_obs, reward, term, trunc, info = env.step(actions)
-                    done = term or trunc
-
-                    ur = info.get("user_rates", None)
-                    if ur is not None and env.user_velocities is not None:
-                        lm = env.user_velocities < env.low_velocity_max
-                        hm = env.user_velocities >= env.high_velocity_min
-                        accum_lo += float(np.sum(ur[lm])) if lm.any() else 0.0
-                        accum_hi += float(np.sum(ur[hm])) if hm.any() else 0.0
-
-                    next_obs_t = torch.tensor(next_obs, device=device,
-                                              dtype=torch.float32)
-                    st  = [obs_t[i*sdim:(i+1)*sdim]      for i in range(env.num_uavs)]
-                    nst = [next_obs_t[i*sdim:(i+1)*sdim]  for i in range(env.num_uavs)]
-                    nob = [next_obs_t[i*sdim:(i+1)*sdim].cpu().numpy()
-                           for i in range(env.num_uavs)]
-
-                    if algo in ADAPTIVE_FAMILY:
-                        agent.store_transition(st, actions, [reward]*env.num_uavs,
-                                               nst, [done]*env.num_uavs,
-                                               obs_t, next_obs_t)
-                    elif algo == "ABQMIX":
-                        agent.store_transition(
-                            obs_t.flatten().cpu().numpy(), obs_np, ab_j,
-                            reward, next_obs_t.flatten().cpu().numpy(), nob)
-                    elif algo in QMIX_FAMILY:
-                        agent.store_transition(st, actions, [reward]*env.num_uavs,
-                                               nst, [done]*env.num_uavs,
-                                               obs_t, next_obs_t)
-                    elif algo == "DMTD":
-                        agent.store_transitions(obs_np, actions,
-                                                [reward]*env.num_uavs, nob,
-                                                gstep + steps)
-                    else:
-                        agent.store_transition(st, actions, [reward]*env.num_uavs,
-                                               nst, [done]*env.num_uavs)
-
-                    if algo == "ABQMIX":
-                        agent.update()
-                    elif algo == "DMTD":
-                        agent.update(gstep + steps)
-                    else:
-                        buf = getattr(agent, "replay_buffer", None)
-                        if buf is not None and len(buf) > getattr(agent, "batch_size", 64):
-                            if steps % 2 == 0:
-                                agent.update()
-
-                    obs_t  = next_obs_t
-                    steps += 1
-
-                if algo == "ABQMIX":
-                    agent.end_episode()
-                env.end_episode()
-
-                n = max(steps, 1)
-                ep_lo.append(accum_lo / n / 1e9)
-                ep_hi.append(accum_hi / n / 1e9)
-                gstep += STEPS_PER_EP
-
-            seeds_low.append(ep_lo)
-            seeds_high.append(ep_hi)
-
-        data[algo] = {"tp_low": seeds_low, "tp_high": seeds_high}
-    return data
-
-
 # ─── G8: Energy Efficiency, PDR & Goodness vs. Number of UEs ─────────────────
 # Sweeps EVAL_NUM_UES; loads saved checkpoints (base model, gamma=0.99).
 # PDR = Σ_k max(0, d_k − r_k) / Σ_k d_k  (fraction of unserved demand, in %)
 # Goodness = 0.5·QoS_ratio + 0.3·Jain_fairness + 0.2·mean_rate_Mbps  (env def.)
 
-def run_g_ue_sweep(device: torch.device, quick: bool) -> Dict:
+def run_g_ue_sweep(device: torch.device, quick: bool, algo_filter=None) -> Dict:
     print("\n=== G_UE: Energy Efficiency / PDR / Goodness vs. Number of UEs ===")
     n_eval = EVAL_RUNS_QUICK if quick else EVAL_RUNS
     n_seed = N_SEEDS_QUICK   if quick else N_SEEDS
+    algos  = algo_filter if algo_filter else ALGO_NAMES
 
     data: Dict = {"num_ues": EVAL_NUM_UES}
-    for algo in tqdm(ALGO_NAMES, desc="G_UE algos"):
-        ee_m,  ee_s,  ee_seeds  = [], [], []
-        pdr_m, pdr_s, pdr_seeds = [], [], []
-        gd_m,  gd_s,  gd_seeds  = [], [], []
+    for algo in tqdm(algos, desc="G_UE algos"):
+        ee_m,    ee_s,    ee_seeds    = [], [], []
+        ee_rf_m, ee_rf_s, ee_rf_seeds = [], [], []
+        pdr_m,   pdr_s,   pdr_seeds   = [], [], []
+        gd_m,    gd_s,    gd_seeds    = [], [], []
+        tp_m,    tp_s,    tp_seeds    = [], [], []
 
         for n_ue in tqdm(EVAL_NUM_UES, desc=f"  {algo} UE sweep", leave=False):
 
             def _ef(n=n_ue):
                 return _make_env_for(algo, device, num_users=n, traffic_load=1.0)
 
-            ee_sv, pdr_sv, gd_sv = [], [], []
+            ee_sv, ee_rf_sv, pdr_sv, gd_sv, tp_sv = [], [], [], [], []
             for seed in range(n_seed):
                 mp = _base_model_path(algo, seed)
                 print(f"  [EVAL]  {algo} num_ue={n_ue} seed={seed} ({n_eval} runs)")
                 res = _evaluate(algo, device, seed, 0.99, mp, n_eval, _ef,
-                                metric_keys=["energy_eff", "pdr", "goodness"])
+                                metric_keys=["energy_eff", "energy_eff_rf", "pdr", "goodness", "throughput"])
                 ee_sv.append(res["energy_eff"])
+                ee_rf_sv.append(res["energy_eff_rf"])
                 pdr_sv.append(res["pdr"])
                 gd_sv.append(res["goodness"])
+                tp_sv.append(res["throughput"] / 1e6)   # convert to Mbps
 
-            ee_m.append(float(np.mean(ee_sv)));   ee_s.append(float(np.std(ee_sv)))
-            pdr_m.append(float(np.mean(pdr_sv))); pdr_s.append(float(np.std(pdr_sv)))
-            gd_m.append(float(np.mean(gd_sv)));   gd_s.append(float(np.std(gd_sv)))
+            ee_m.append(float(np.mean(ee_sv)));       ee_s.append(float(np.std(ee_sv)))
+            ee_rf_m.append(float(np.mean(ee_rf_sv))); ee_rf_s.append(float(np.std(ee_rf_sv)))
+            pdr_m.append(float(np.mean(pdr_sv)));     pdr_s.append(float(np.std(pdr_sv)))
+            gd_m.append(float(np.mean(gd_sv)));       gd_s.append(float(np.std(gd_sv)))
+            tp_m.append(float(np.mean(tp_sv)));       tp_s.append(float(np.std(tp_sv)))
             ee_seeds.append([float(v) for v in ee_sv])
+            ee_rf_seeds.append([float(v) for v in ee_rf_sv])
             pdr_seeds.append([float(v) for v in pdr_sv])
             gd_seeds.append([float(v) for v in gd_sv])
+            tp_seeds.append([float(v) for v in tp_sv])
 
         data[algo] = {
-            "ee_mean":    ee_m,     "ee_std":    ee_s,   "ee_seeds":   ee_seeds,
-            "pdr_mean":   pdr_m,    "pdr_std":   pdr_s,  "pdr_seeds":  pdr_seeds,
-            "good_mean":  gd_m,     "good_std":  gd_s,   "good_seeds": gd_seeds,
+            "ee_mean":       ee_m,     "ee_std":       ee_s,    "ee_seeds":    ee_seeds,
+            "ee_rf_mean":    ee_rf_m,  "ee_rf_std":    ee_rf_s, "ee_rf_seeds": ee_rf_seeds,
+            "pdr_mean":      pdr_m,    "pdr_std":      pdr_s,   "pdr_seeds":   pdr_seeds,
+            "good_mean":     gd_m,     "good_std":     gd_s,    "good_seeds":  gd_seeds,
+            "tp_mean":       tp_m,     "tp_std":       tp_s,    "tp_seeds":    tp_seeds,
         }
     return data
 
 
 # ─── G9: Packet Drop Rate vs. Packet Arrival Rate ────────────────────────────
-# Reuses CALL_RATES x-axis (same as G2/G3) but collects PDR instead of HO/EE.
-# traffic_load = call_rate / max(CALL_RATES) normalises to [0,1] for the env.
+# CALL_RATES (calls/s) map to traffic_load via a fixed reference rate so that
+# the sweep spans underload (tload<1) through overload (tload>1).
+# Reference: _NOMINAL_CALL_RATE calls/s → traffic_load = 1.0 (baseline load).
+
+_NOMINAL_CALL_RATE = 500.0   # calls/s that corresponds to traffic_load = 1.0
 
 def run_g_pdr_arrival(device: torch.device, quick: bool) -> Dict:
     print("\n=== G_PDR_ARR: Packet Drop Rate vs. Packet Arrival Rate ===")
     n_eval = EVAL_RUNS_QUICK if quick else EVAL_RUNS
     n_seed = N_SEEDS_QUICK   if quick else N_SEEDS
-    max_r  = float(max(CALL_RATES))
 
     data: Dict = {"call_rates": CALL_RATES}
     for algo in tqdm(ALGO_NAMES, desc="G_PDR_ARR algos"):
         pdr_m, pdr_s, pdr_seeds = [], [], []
 
         for rate in tqdm(CALL_RATES, desc=f"  {algo} eval", leave=False):
-            tload = rate / max_r
+            tload = rate / _NOMINAL_CALL_RATE   # 100→0.2, 500→1.0, 1000→2.0
 
             def _ef(tload=tload):
                 return _make_env_for(algo, device, traffic_load=tload)
@@ -865,6 +641,109 @@ def run_g_goodness_sinr(device: torch.device, quick: bool) -> Dict:
     return data
 
 
+# ─── EE vs Number of UAVs ────────────────────────────────────────────────────
+# Trains separate models for each UAV count (skips if checkpoint exists),
+# then evaluates energy efficiency.  Stored as {algo}_uav{n}_seed{s}_final.pt.
+
+def run_g_uav_sweep(device: torch.device, quick: bool, algo_filter=None) -> Dict:
+    print("\n=== EE vs. Number of UAVs ===")
+    n_train = TRAIN_EPISODES_QUICK if quick else TRAIN_EPISODES
+    n_eval  = EVAL_RUNS_QUICK      if quick else EVAL_RUNS
+    n_seed  = N_SEEDS_QUICK        if quick else N_SEEDS
+
+    algos = [a for a in ALGO_NAMES if algo_filter is None or a in algo_filter]
+    data: Dict = {"num_uavs": NUM_UAVS_SWEEP}
+
+    for algo in tqdm(algos, desc="EE_vs_UAV algos"):
+        ee_m, ee_s, ee_seeds = [], [], []
+
+        for n_uav in tqdm(NUM_UAVS_SWEEP, desc=f"  {algo} UAV sweep", leave=False):
+            ee_sv = []
+            for seed in range(n_seed):
+                # Reuse saved base model when UAV count matches training config
+                if n_uav == NUM_UAVS:
+                    mp = _base_model_path(algo, seed)
+                    print(f"  [REUSE]  {algo} n_uav={n_uav} seed={seed} (base model)")
+                else:
+                    mp = _uav_model_path(algo, seed, n_uav)
+                    if not os.path.isfile(mp):
+                        print(f"  [TRAIN] {algo} n_uav={n_uav} seed={seed}")
+                        env = _make_env_for(algo, device, num_uavs=n_uav)
+                        env.reset(seed=seed)
+                        agent = create_agent(algo, env, device, gamma=0.99, seed=seed)
+                        sdim  = getattr(env, "agent_obs_dim",
+                                        env.observation_space.shape[0] // env.num_uavs)
+                        rng   = np.random.default_rng(seed + 99999)
+                        gstep = 0
+                        for ep in range(n_train):
+                            env.num_users    = int(rng.choice(TRAIN_UE_COUNTS))
+                            env.traffic_load = float(rng.choice(TRAIN_TRAFFIC_LOADS))
+                            vel              = float(rng.choice(TRAIN_VELOCITIES))
+                            def _post(e, _v=vel, _s=seed*100000+ep):
+                                _set_all_velocity(e, _v, _s)
+                            _run_episode(algo, agent, env, device, sdim,
+                                         gstep=gstep, explore=True, post_reset_fn=_post)
+                            gstep += STEPS_PER_EP
+                        if hasattr(agent, "save"):
+                            try:
+                                agent.save(mp)
+                            except Exception as e:
+                                print(f"  [warn] save failed: {e}")
+
+                def _ef(n=n_uav):
+                    return _make_env_for(algo, device, num_uavs=n, traffic_load=1.0)
+
+                print(f"  [EVAL]  {algo} n_uav={n_uav} seed={seed} ({n_eval} runs)")
+                res = _evaluate(algo, device, seed, 0.99, mp, n_eval, _ef,
+                                metric_keys=["energy_eff"])
+                ee_sv.append(res["energy_eff"])
+
+            ee_m.append(float(np.mean(ee_sv)))
+            ee_s.append(float(np.std(ee_sv)))
+            ee_seeds.append([float(v) for v in ee_sv])
+
+        data[algo] = {"ee_mean": ee_m, "ee_std": ee_s, "ee_seeds": ee_seeds}
+    return data
+
+
+# ─── Reward vs Discount Factor ───────────────────────────────────────────────
+# Trains each algo at each gamma value (skips if model already exists),
+# then evaluates average episodic reward.  Separate checkpoints are stored as
+# {algo}_g{gamma}_seed{s}_final.pt so they don't overwrite the base models.
+
+def run_g_reward_vs_gamma(device: torch.device, quick: bool, algo_filter=None) -> Dict:
+    print("\n=== Reward vs. Discount Factor ===")
+    n_train = TRAIN_EPISODES_QUICK if quick else TRAIN_EPISODES
+    n_eval  = EVAL_RUNS_QUICK      if quick else EVAL_RUNS
+    n_seed  = N_SEEDS_QUICK        if quick else N_SEEDS
+
+    algos = [a for a in ALGO_NAMES if algo_filter is None or a in algo_filter]
+    data: Dict = {"gammas": GAMMAS}
+    for algo in tqdm(algos, desc="reward_vs_gamma algos"):
+        means, stds = [], []
+        for g in tqdm(GAMMAS, desc=f"  {algo} gamma sweep", leave=False):
+            sv = []
+            for seed in range(n_seed):
+                mp = _gamma_model_path(algo, seed, g)
+                if not os.path.isfile(mp):
+                    print(f"  [FINETUNE] {algo} gamma={g} seed={seed}")
+                    train_and_save(algo, device, seed, gamma=g,
+                                   model_path=mp, n_train=n_train,
+                                   pretrain_path=_base_model_path(algo, seed))
+
+                def _ef():
+                    return _make_env_for(algo, device, traffic_load=1.0)
+
+                print(f"  [EVAL]  {algo} gamma={g} seed={seed} ({n_eval} runs)")
+                res = _evaluate(algo, device, seed, g, mp, n_eval, _ef,
+                                metric_keys=["reward"])
+                sv.append(res["reward"])
+            means.append(float(np.mean(sv)))
+            stds.append(float(np.std(sv)))
+        data[algo] = {"mean": means, "std": stds}
+    return data
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -873,8 +752,11 @@ def main() -> None:
     p.add_argument("--quick", action="store_true",
                    help="Smoke-test with tiny episode/eval counts.")
     p.add_argument("--only", type=str, default="",
-                   help="train | g1 | g2g3 | g4 | g5 | g6g7 | "
-                        "g_ue_sweep | g_pdr_arrival | g_goodness_sinr  (comma-separated)")
+                   help="train | g_ue_sweep | g_pdr_arrival | g_goodness_sinr | "
+                        "g_uav_sweep | g_reward_vs_gamma  (comma-separated)")
+    p.add_argument("--algos", type=str, default="",
+                   help="Comma-separated algorithms to train, e.g. IQL,VDN,QMIX. "
+                        "Omit to train all.")
     p.add_argument("--out", type=str, default=RESULTS_PATH)
     args = p.parse_args()
 
@@ -892,8 +774,9 @@ def main() -> None:
     only = set(args.only.lower().split(",")) if args.only else set()
 
     # ── STEP 1: train all base models ─────────────────────────────────────────
+    algo_filter = [a.strip() for a in args.algos.split(",") if a.strip()] if args.algos else None
     if not only or "train" in only:
-        train_all(device, n_train, n_seed)
+        train_all(device, n_train, n_seed, algo_filter=algo_filter)
 
     # ── STEP 2: graph evaluations ──────────────────────────────────────────────
     results: Dict = {}
@@ -918,14 +801,11 @@ def main() -> None:
             json.dump(results, fh, indent=2)
         print(f"  Saved -> {args.out}")
 
-    _run("g1",             run_g1)
-    _run("g2g3",           run_g2g3)
-    _run("g4",             run_g4)
-    _run("g5",             run_g5)
-    _run("g6g7",           run_g6g7)
-    _run("g_ue_sweep",     run_g_ue_sweep)
-    _run("g_pdr_arrival",  run_g_pdr_arrival)
-    _run("g_goodness_sinr", run_g_goodness_sinr)
+    _run("g_ue_sweep",        lambda dev, q: run_g_ue_sweep(dev, q, algo_filter=algo_filter))
+    _run("g_pdr_arrival",     run_g_pdr_arrival)
+    _run("g_goodness_sinr",   run_g_goodness_sinr)
+    _run("g_uav_sweep",       lambda dev, q: run_g_uav_sweep(dev, q, algo_filter=algo_filter))
+    _run("g_reward_vs_gamma", lambda dev, q: run_g_reward_vs_gamma(dev, q, algo_filter=algo_filter))
 
     print(f"\nAll done.")
     print(f"Results -> {args.out}")

@@ -92,7 +92,7 @@ class VDN:
         target_q_total = torch.stack(target_q_values, dim=1).sum(dim=1)
         
         # Compute target
-        rewards_sum = rewards.sum(dim=1)
+        rewards_sum = rewards.mean(dim=1)
         dones_any = dones.any(dim=1).float()
         target_q_total = rewards_sum + (1 - dones_any) * self.gamma * target_q_total
         
@@ -123,7 +123,7 @@ class VDN:
     
     def load(self, path: str) -> None:
         """Load model checkpoints."""
-        checkpoint = torch.load(path, weights_only=False)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         for i, state_dict in enumerate(checkpoint['q_networks']):
             self.q_networks[i].load_state_dict(state_dict)
         for i, state_dict in enumerate(checkpoint['target_q_networks']):

@@ -54,10 +54,12 @@ class MARLEnv(gym.Env):
                  pareto_scale: float = 1.0,
                  traffic_load: float = 1.0,
                  low_velocity_max: float = 1.0,
-                 high_velocity_min: float = 5.0):
+                 high_velocity_min: float = 5.0,
+                 sinr_threshold_db: float = -5.0):
         super(MARLEnv, self).__init__()
         self.num_uavs = num_uavs
         self.num_users = num_users
+        self.sinr_threshold_linear = 10 ** (sinr_threshold_db / 10.0)
         self.grid_size = grid_size
         import torch
         self.device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -191,7 +193,7 @@ class MARLEnv(gym.Env):
         self._p_tx_watt = float(10 ** (self.transmit_power_dbm / 10.0) / 1000.0)
         
         # Maximum steps per episode
-        self.max_steps = 50
+        self.max_steps = 100
         self.current_step = 0
         
         # Optional association function from agent (for novel algorithms)
@@ -488,7 +490,8 @@ class MARLEnv(gym.Env):
         # Calculate SNR and user rates for each UAV-user pair
         noise_power_linear = 10 ** (self.noise_power_dbm / 10) / 1000
         tx_power_linear = 10 ** (self.transmit_power_dbm / 10) / 1000
-        
+
+        # SNR-only (used for association decision, consistent with training)
         sinr = (tx_power_linear * gains_linear) / noise_power_linear
         rates = self.bandwidth * np.log2(1 + sinr)
         
@@ -535,13 +538,25 @@ class MARLEnv(gym.Env):
         else:
             mean_uav_ground_dist = 0.0
         
+        # Interference-aware SINR for actual rate calculation
+        # SINR_{k*,u} = P_tx * g_{k*,u} / (N0 + Σ_{k≠k*} P_tx * g_{k,u})
+        sinr_interference = np.zeros(self.num_users)
+        for j in range(self.num_users):
+            k_star = best_uav_indices[j]
+            signal = tx_power_linear * gains_linear[k_star, j]
+            interference = np.sum(tx_power_linear * gains_linear[:, j]) - signal
+            sinr_interference[j] = signal / (noise_power_linear + interference)
+        rates_interference = self.bandwidth * np.log2(1 + sinr_interference)
+        # Zero out UEs whose SINR falls below threshold (outage condition)
+        rates_interference[sinr_interference < self.sinr_threshold_linear] = 0.0
+
         uav_user_rates = [[] for _ in range(self.num_uavs)]
         per_user_served_rates = np.zeros(self.num_users)
 
         for j in range(self.num_users):
             uav_idx = best_uav_indices[j]
-            uav_user_rates[uav_idx].append(rates[uav_idx, j])
-            per_user_served_rates[j] = rates[uav_idx, j]
+            uav_user_rates[uav_idx].append(rates_interference[j])
+            per_user_served_rates[j] = rates_interference[j]
 
         # Apply non-stationary traffic demand multiplier
         traffic_multiplier = self.base_traffic_demand if self.enable_non_stationary else 1.0
@@ -601,6 +616,11 @@ class MARLEnv(gym.Env):
         e_prop = self._propulsion_j_per_m * self._step_total_displacement
         step_energy_j = float(e_comm + e_hover + e_prop)
         energy_efficiency_mbitpj = float(total_throughput / 1e6) / (step_energy_j + 1e-9)
+        # EE variant: denominator = RF tx power + UAV propulsion only (no hover)
+        # EE_rf_move = Throughput (Mbit) / (P_tx·Δt + ξ·d)
+        #   P_tx = per-UAV RF transmit power (W), ξ = propulsion energy per metre (J/m)
+        energy_rf_move_j = float(e_comm + e_prop)
+        energy_eff_rf_move_mbitpj = float(total_throughput / 1e6) / (energy_rf_move_j + 1e-9)
 
         # ---- VBR Traffic Demand and Packet Drop Rate ----
         if self.traffic_model == 'pareto':
@@ -641,6 +661,8 @@ class MARLEnv(gym.Env):
             'mean_uav_distance': mean_uav_ground_dist,
             'step_energy_j': step_energy_j,
             'energy_efficiency_mbitpj': energy_efficiency_mbitpj,
+            'energy_rf_move_j': energy_rf_move_j,
+            'energy_eff_rf_move_mbitpj': energy_eff_rf_move_mbitpj,
             'packet_drop_rate': packet_drop_rate,
             'packet_drop_rate_low': pdr_low,
             'packet_drop_rate_high': pdr_high,

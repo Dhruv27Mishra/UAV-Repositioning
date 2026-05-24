@@ -243,7 +243,7 @@ class QMIX:
     
     def load(self, path: str) -> None:
         """Load model checkpoints."""
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device)
         for i, state_dict in enumerate(checkpoint['q_networks']):
             self.q_networks[i].load_state_dict(state_dict)
         for i, state_dict in enumerate(checkpoint['target_q_networks']):

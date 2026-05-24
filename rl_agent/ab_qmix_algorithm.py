@@ -236,6 +236,11 @@ class ABQMIX:
             net.eval()
         self.target_mixing_network.eval()
 
+        self.agent_networks.to(self.device)
+        self.mixing_network.to(self.device)
+        self.target_agent_networks.to(self.device)
+        self.target_mixing_network.to(self.device)
+
         all_params = list(self.agent_networks.parameters()) + \
                      list(self.mixing_network.parameters())
         self.optimizer = optim.Adam(all_params, lr=learning_rate)

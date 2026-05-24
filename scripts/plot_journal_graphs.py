@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import json
 import warnings
@@ -21,16 +22,18 @@ ALGO_NAMES = [
     "DMTD", "DeepNashQ", "PerformativeMFMARL", "PerformativeMARL",
 ]
 
+GAMMAS = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
+
 COLORS: Dict[str, str] = {
-    "QMIX":               "#e63946",   # red        (~0°)
-    "ABQMIX":             "#fb8500",   # orange     (~35°)
-    "IQL":                "#ffd60a",   # yellow     (~55°)
-    "VDN":                "#38b000",   # green      (~110°)
-    "MADDPG":             "#3a86ff",   # blue       (~220°)
-    "DMTD":               "#7b2d8b",   # deep violet(~280°)
-    "DeepNashQ":          "#f72585",   # hot pink   (~325°)
-    "PerformativeMFMARL": "#00b4d8",   # cyan       (~195°, proposed)
-    "PerformativeMARL":   "#06d6a0",   # teal/mint  (~165°, proposed)
+    "QMIX":               "#1f4e79",
+    "ABQMIX":             "#4682b4",
+    "IQL":                "#e67e22",
+    "VDN":                "#008080",
+    "MADDPG":             "#e88bb3",
+    "DMTD":               "#8b4513",
+    "DeepNashQ":          "#b8860b",
+    "PerformativeMFMARL": "#87ceeb",
+    "PerformativeMARL":   "#bdb76b",
 }
 
 MARKERS: Dict[str, str] = {
@@ -46,9 +49,9 @@ MARKERS: Dict[str, str] = {
 }
 
 PROPOSED        = frozenset({"PerformativeMFMARL", "PerformativeMARL"})
-LINEWIDTH       = 2.0
-BAND_ALPHA      = 0.20   # SE-based CI band (narrower than σ, slightly more opaque)
-FIG_SIZE        = (14, 8)
+LINEWIDTH       = 1.8
+BAND_ALPHA      = 0.12
+FIG_SIZE        = (3.5, 2.8)
 DPI             = 300
 SPLINE_K        = 3      # cubic B-spline
 N_INTERP_PARAM  = 400    # output points for parameter-sweep spline
@@ -61,9 +64,12 @@ MA_WINDOW_MAX   = 300
 # Knot density for spline after MA: fewer knots -> smoother curve
 SPLINE_KNOTS    = 80     # subsample to this many knots before fitting spline
 
-GRID_STYLE  = dict(color="#cccccc", linestyle="--", linewidth=0.6, alpha=0.8)
-LEGEND_KW   = dict(ncol=2, fontsize=9, framealpha=0.92, frameon=True,
-                   fancybox=False, edgecolor="0.4", loc="best")
+GRID_STYLE  = dict(color="#cccccc", linestyle="--", linewidth=0.5, alpha=0.3)
+LEGEND_KW   = dict(ncol=3, fontsize=6, framealpha=0.92,
+                   frameon=True, fancybox=False, edgecolor="0.4",
+                   loc="upper center", bbox_to_anchor=(0.5, -0.18),
+                   handlelength=1.5, handletextpad=0.4,
+                   columnspacing=0.8, labelspacing=0.3)
 
 OUT_DIR   = os.path.join(os.path.dirname(__file__), "..", "graphs")
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "results", "journal_data.json")
@@ -158,30 +164,53 @@ def _smooth_param_curve(
 
 def _setup_style() -> None:
     plt.rcParams.update({
-        "font.family":        "serif",
-        "font.size":          11,
-        "axes.titlesize":     13,
-        "axes.labelsize":     12,
-        "xtick.labelsize":    10,
-        "ytick.labelsize":    10,
-        "legend.fontsize":    9,
-        "figure.dpi":         DPI,
-        "savefig.dpi":        DPI,
-        "savefig.bbox":       "tight",
-        "axes.facecolor":     "white",
-        "figure.facecolor":   "white",
-        "axes.edgecolor":     "#444444",
-        "axes.linewidth":     0.8,
+        "figure.figsize":           FIG_SIZE,
+        "font.family":              "serif",
+        "font.serif":               ["Times New Roman", "Times", "DejaVu Serif"],
+        "font.size":                8,
+        "axes.titlesize":           9,
+        "axes.titleweight":         "bold",
+        "axes.labelsize":           8,
+        "axes.labelweight":         "bold",
+        "xtick.labelsize":          7,
+        "ytick.labelsize":          7,
+        "legend.fontsize":          6,
+        "legend.handlelength":      1.5,
+        "legend.handletextpad":     0.4,
+        "legend.columnspacing":     0.8,
+        "legend.labelspacing":      0.3,
+        "lines.linewidth":          LINEWIDTH,
+        "lines.markersize":         0,
+        "figure.dpi":               DPI,
+        "savefig.dpi":              DPI,
+        "savefig.bbox":             "tight",
+        "savefig.pad_inches":       0.02,
+        "grid.alpha":               0.3,
+        "grid.linewidth":           0.5,
+        "grid.linestyle":           "--",
+        "axes.linewidth":           0.6,
+        "xtick.major.width":        0.5,
+        "ytick.major.width":        0.5,
+        "xtick.major.size":         3,
+        "ytick.major.size":         3,
+        "axes.facecolor":           "white",
+        "figure.facecolor":         "white",
     })
 
 
 def _finalize_ax(ax: plt.Axes, xlabel: str, ylabel: str, title: str) -> None:
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    ax.set_xlabel(xlabel, fontsize=8, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=8, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=7, pad=2)
+    for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+        lbl.set_fontweight("bold")
+    ax.minorticks_on()
+    ax.tick_params(axis="both", which="minor", length=1.5, width=0.4)
     ax.grid(**GRID_STYLE)
     ax.legend(**LEGEND_KW)
     ax.spines[["top", "right"]].set_visible(False)
+    fig = ax.get_figure()
+    fig.subplots_adjust(bottom=0.32)
 
 
 def _save(fig: plt.Figure, name: str) -> None:
@@ -227,17 +256,12 @@ def _plot_param_sweep(
         se = stds / np.sqrt(max(n_seeds, 1))
 
         x_sm, y_sm = _smooth_param_curve(x_raw, means)
-        _,    y_lo = _smooth_param_curve(x_raw, means - se)
-        _,    y_hi = _smooth_param_curve(x_raw, means + se)
+        x_se_lo, y_se_lo = _smooth_param_curve(x_raw, means - se)
+        x_se_hi, y_se_hi = _smooth_param_curve(x_raw, means + se)
 
-        marker = MARKERS.get(algo, "o")
-        ax.fill_between(x_sm, y_lo, y_hi,
-                        color=color, alpha=BAND_ALPHA, linewidth=0, zorder=zo - 1)
         ax.plot(x_sm, y_sm, color=color, linewidth=lw, label=algo, zorder=zo)
-        # Markers at actual measured mean values (real eval points, not interpolated)
-        ax.plot(x_raw, means, marker=marker, color=color, linestyle="none",
-                markersize=5, markeredgecolor="white", markeredgewidth=0.7,
-                zorder=zo + 1)
+        ax.fill_between(x_se_lo, y_se_lo, y_se_hi,
+                        color=color, alpha=BAND_ALPHA, zorder=zo - 1)
 
     ax.set_xlim(x_raw[0], x_raw[-1])
     if x_tick_labels:
@@ -278,7 +302,7 @@ def plot_g2(data: Dict) -> None:
         mean_key = "ho_mean",
         std_key  = "ho_std",
         data     = d,
-        xlabel   = "Call Arrival Rate (requests/s)  [VBR / Pareto]",
+        xlabel   = "Call Arrival Rate (requests/s)  [VBR]",
         ylabel   = "Handover Rate (switches/episode)",
         title    = "Handover Rate vs. Call Arrival Rate",
         out_name = "handover_vs_call_rate.png",
@@ -377,14 +401,8 @@ def _plot_mobility_curve(
 
         # ── Layer 2: thick smooth mean curve on top
         ep_sm, mean_sm = _smooth_training_curve(ep, mean_raw, n_out=N_INTERP_CURVE)
-        marker = MARKERS.get(algo, "o")
         ax.plot(ep_sm, mean_sm, color=color, linewidth=lw,
                 label=algo, zorder=zo)
-        # Markers at actual episode mean values every ~10% of total episodes
-        step = max(1, len(ep) // 10)
-        ax.plot(ep[::step], mean_raw[::step], marker=marker, color=color,
-                linestyle="none", markersize=5,
-                markeredgecolor="white", markeredgewidth=0.7, zorder=zo + 1)
 
     ax.set_xlim(1, n_ep)
     ax.xaxis.set_major_locator(mticker.MultipleLocator(max(1, n_ep // 8)))
@@ -418,38 +436,61 @@ def plot_g7(data: Dict) -> None:
 def plot_g8_ee_vs_ue(data: Dict) -> None:
     if "g_ue_sweep" not in data:
         print("G8: no data — run run_journal_experiments.py --only g_ue_sweep"); return
-    d = data["g_ue_sweep"]
+    d       = data["g_ue_sweep"]
+    num_ues = d["num_ues"]
+    scaled  = {"num_ues": num_ues}
+    for algo in ALGO_NAMES:
+        if algo not in d: continue
+        adat = d[algo]
+        scaled[algo] = {**adat,
+            "ee_mean": [m / n for m, n in zip(adat["ee_mean"], num_ues)],
+            "ee_std":  [s / n for s, n in zip(adat["ee_std"],  num_ues)],
+        }
     _plot_param_sweep(
-        xvals     = d["num_ues"],
+        xvals     = num_ues,
         mean_key  = "ee_mean",
         std_key   = "ee_std",
         seeds_key = "ee_seeds",
-        data      = d,
+        data      = scaled,
         xlabel    = "Number of UEs",
-        ylabel    = "Energy Efficiency (Mbit/J)",
+        ylabel    = "Energy Efficiency per UE (Mbit/J/UE)",
         title     = "Energy Efficiency vs. Number of UEs",
         out_name  = "energy_eff_vs_num_ue.png",
     )
 
 
-# ─── G9: Packet Drop Rate vs. Number of UEs ──────────────────────────────────
-# PDR = Σ_k max(0, d_k − r_k) / Σ_k d_k  averaged over steps, reported in %
+# ─── G9: Packet Drop Rate vs. Number of UEs — grouped bar chart ──────────────
 
 def plot_g9_pdr_vs_ue(data: Dict) -> None:
     if "g_ue_sweep" not in data:
         print("G9: no data — run run_journal_experiments.py --only g_ue_sweep"); return
-    d = data["g_ue_sweep"]
-    _plot_param_sweep(
-        xvals     = d["num_ues"],
-        mean_key  = "pdr_mean",
-        std_key   = "pdr_std",
-        seeds_key = "pdr_seeds",
-        data      = d,
-        xlabel    = "Number of UEs",
-        ylabel    = "Packet Drop Rate (%)",
-        title     = "Packet Drop Rate vs. Number of UEs",
-        out_name  = "pdr_vs_num_ue.png",
-    )
+    d       = data["g_ue_sweep"]
+    num_ues = d["num_ues"]
+    algos   = [a for a in ALGO_NAMES if a in d]
+
+    n_groups = len(num_ues)
+    n_bars   = len(algos)
+    bar_w    = 0.8 / n_bars
+    x        = np.arange(n_groups)
+
+    # Two-column width for bar chart — too many bars for single column
+    fig, ax = plt.subplots(figsize=(7.0, 3.5))
+    for i, algo in enumerate(algos):
+        means = np.array(d[algo]["pdr_mean"])
+        offset = (i - n_bars / 2 + 0.5) * bar_w
+        ax.bar(x + offset, means, width=bar_w,
+               color=COLORS[algo], label=algo,
+               edgecolor="white", linewidth=0.4,
+               zorder=3)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(n) for n in num_ues])
+    _finalize_ax(ax, "Number of UEs", "Packet Drop Rate (%)",
+                 "Packet Drop Rate vs. Number of UEs")
+    ax.grid(axis="y", **GRID_STYLE)
+    ax.grid(axis="x", visible=False)
+    fig.tight_layout()
+    _save(fig, "pdr_vs_num_ue.png")
 
 
 # ─── G10: Goodness vs. Number of UEs ─────────────────────────────────────────
@@ -485,34 +526,160 @@ def plot_g11_pdr_vs_arrival(data: Dict) -> None:
         std_key   = "pdr_std",
         seeds_key = "pdr_seeds",
         data      = d,
-        xlabel    = "Packet Arrival Rate (requests/s)  [VBR / Pareto]",
+        xlabel    = "Packet Arrival Rate (requests/s)  [VBR]",
         ylabel    = "Packet Drop Rate (%)",
         title     = "Packet Drop Rate vs. Packet Arrival Rate",
         out_name  = "pdr_vs_packet_arrival_rate.png",
     )
 
 
-# ─── G12: Goodness vs. QoS SINR Threshold ────────────────────────────────────
-# x-axis = SINR_THRESHOLDS_DB (dB).
-# Each threshold maps to min_user_rate via R = B·log2(1+10^(γ/10)), B=10 MHz.
-# Higher threshold -> stricter QoS -> lower goodness expected.
+# ─── G12: Goodness vs. QoS SINR Threshold — TABLE ───────────────────────────
+# Outputs a CSV and a LaTeX table instead of a plot.
+# Rows = SINR thresholds; columns = algorithms (mean ± std).
 
 def plot_g12_goodness_vs_sinr(data: Dict) -> None:
     if "g_goodness_sinr" not in data:
         print("G12: no data — run run_journal_experiments.py --only g_goodness_sinr"); return
-    d = data["g_goodness_sinr"]
+    d         = data["g_goodness_sinr"]
     sinr_vals = d["sinr_thresholds_db"]
+    mr_vals   = d.get("min_user_rates_mbps", [""] * len(sinr_vals))
+    algos     = [a for a in ALGO_NAMES if a in d]
+
+    os.makedirs(OUT_DIR, exist_ok=True)
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
+    csv_path = os.path.join(OUT_DIR, "goodness_vs_sinr_table.csv")
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["SINR_dB", "R_min_Mbps"] + algos)
+        for i, (s, mr) in enumerate(zip(sinr_vals, mr_vals)):
+            row = [f"{s:+d}", f"{mr:.2f}" if mr else ""]
+            for algo in algos:
+                adat = d[algo]
+                mu  = adat["good_mean"][i]
+                std = adat["good_std"][i]
+                row.append(f"{mu:.4f} ± {std:.4f}")
+            w.writerow(row)
+    print(f"Saved -> {csv_path}")
+
+    # ── LaTeX ─────────────────────────────────────────────────────────────────
+    tex_path = os.path.join(OUT_DIR, "goodness_vs_sinr_table.tex")
+    with open(tex_path, "w") as f:
+        col_spec = "r r " + " ".join(["c"] * len(algos))
+        f.write("\\begin{table}[t]\n")
+        f.write("\\centering\n")
+        f.write("\\caption{Goodness Score vs.\\ QoS SINR Threshold "
+                "(mean $\\pm$ std over 5 seeds)}\n")
+        f.write("\\label{tab:goodness_sinr}\n")
+        f.write(f"\\begin{{tabular}}{{{col_spec}}}\n\\toprule\n")
+        header = ["SINR (dB)", "$R_{\\min}$ (Mbps)"] + \
+                 [a.replace("_", "\\_") for a in algos]
+        f.write(" & ".join(header) + " \\\\\n\\midrule\n")
+        for i, (s, mr) in enumerate(zip(sinr_vals, mr_vals)):
+            row = [f"${s:+d}$", f"{mr:.1f}" if mr else ""]
+            for algo in algos:
+                adat = d[algo]
+                mu  = adat["good_mean"][i]
+                std = adat["good_std"][i]
+                row.append(f"${mu:.3f}\\pm{std:.3f}$")
+            f.write(" & ".join(row) + " \\\\\n")
+        f.write("\\bottomrule\n\\end{tabular}\n\\end{table}\n")
+    print(f"Saved -> {tex_path}")
+
+
+# ─── Average Throughput vs. Number of UEs ────────────────────────────────────
+
+def plot_g_tp_vs_ue(data: Dict) -> None:
+    if "g_ue_sweep" not in data:
+        print("TP_UE: no data — run run_journal_experiments.py --only g_ue_sweep"); return
+    d = data["g_ue_sweep"]
+    if "tp_mean" not in next((v for _, v in d.items() if isinstance(v, dict)), {}):
+        print("TP_UE: tp_mean not in data — delete g_ue_sweep key and re-run"); return
+    num_ues = d["num_ues"]
+    scaled  = {"num_ues": num_ues}
+    for algo in ALGO_NAMES:
+        if algo not in d: continue
+        adat = d[algo]
+        scaled[algo] = {**adat,
+            "tp_mean": [m / n for m, n in zip(adat["tp_mean"], num_ues)],
+            "tp_std":  [s / n for s, n in zip(adat["tp_std"],  num_ues)],
+        }
     _plot_param_sweep(
-        xvals         = sinr_vals,
-        mean_key      = "good_mean",
-        std_key       = "good_std",
-        seeds_key     = "good_seeds",
+        xvals     = num_ues,
+        mean_key  = "tp_mean",
+        std_key   = "tp_std",
+        seeds_key = "tp_seeds",
+        data      = scaled,
+        xlabel    = "Number of UEs",
+        ylabel    = "Average Throughput per UE (Mbps/UE)",
+        title     = "Average Throughput vs. Number of UEs",
+        out_name  = "throughput_vs_num_ue.png",
+    )
+
+
+# ─── Energy Efficiency vs. Number of UAVs ────────────────────────────────────
+
+def plot_g_ee_vs_uav(data: Dict) -> None:
+    if "g_uav_sweep" not in data:
+        print("EE_UAV: no data — run run_journal_experiments.py --only g_uav_sweep"); return
+    d = data["g_uav_sweep"]
+    _plot_param_sweep(
+        xvals     = d["num_uavs"],
+        mean_key  = "ee_mean",
+        std_key   = "ee_std",
+        seeds_key = "ee_seeds",
+        data      = d,
+        xlabel    = "Number of UAVs",
+        ylabel    = "Energy Efficiency (Mbit/J)",
+        title     = "Energy Efficiency vs. Number of UAVs",
+        out_name  = "energy_eff_vs_num_uav.png",
+    )
+
+
+# ─── EE (RF+Movement only) vs. Number of UEs ─────────────────────────────────
+# EE_rf_move = Throughput (Mbit) / (P_tx·Δt + ξ·d)
+#   P_tx = RF transmit power per UAV (1 W at 30 dBm × 3 UAVs)
+#   ξ    = propulsion energy coefficient (6 J/m)
+#   d    = total UAV displacement per step (m)
+# This excludes the constant hover power and isolates controllable energy costs.
+
+def plot_g_ee_rf_vs_ue(data: Dict) -> None:
+    if "g_ue_sweep" not in data:
+        print("EE_RF: no data — run run_journal_experiments.py --only g_ue_sweep"); return
+    d = data["g_ue_sweep"]
+    if "ee_rf_mean" not in next(iter(v for k, v in d.items() if isinstance(v, dict)), {}):
+        print("EE_RF: ee_rf_mean not in data — re-run g_ue_sweep to collect this metric"); return
+    _plot_param_sweep(
+        xvals     = d["num_ues"],
+        mean_key  = "ee_rf_mean",
+        std_key   = "ee_rf_std",
+        seeds_key = "ee_rf_seeds",
+        data      = d,
+        xlabel    = "Number of UEs",
+        ylabel    = "Energy Efficiency (Mbit/J)",
+        title     = "Energy Efficiency (RF + Movement) vs. Number of UEs\n"
+                    r"$\eta = \frac{\text{Throughput (Mbit)}}{P_{tx}\Delta t + \xi d}$",
+        out_name  = "energy_eff_rf_move_vs_num_ue.png",
+    )
+
+
+# ─── Reward vs. Discount Factor ───────────────────────────────────────────────
+
+def plot_g_reward_vs_gamma(data: Dict) -> None:
+    if "g_reward_vs_gamma" not in data:
+        print("Reward vs gamma: no data — run run_journal_experiments.py --only g_reward_vs_gamma")
+        return
+    d = data["g_reward_vs_gamma"]
+    _plot_param_sweep(
+        xvals         = d["gammas"],
+        mean_key      = "mean",
+        std_key       = "std",
         data          = d,
-        xlabel        = "QoS SINR Threshold (dB)",
-        ylabel        = "Goodness Score",
-        title         = "Goodness vs. QoS SINR Threshold",
-        out_name      = "goodness_vs_sinr_threshold.png",
-        x_tick_labels = [f"{s:+d}" for s in sinr_vals],
+        xlabel        = "Discount Factor (γ)",
+        ylabel        = "Average Episodic Reward",
+        title         = "Reward vs. Discount Factor",
+        out_name      = "reward_vs_gamma.png",
+        x_tick_labels = [str(g) for g in d["gammas"]],
     )
 
 
@@ -522,8 +689,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default=DATA_PATH)
     parser.add_argument("--only", type=str, default="",
-                        help="Comma-separated graph IDs: g1,g2,g3,g4,g5,g6,g7,"
-                             "g8,g9,g10,g11,g12")
+                        help="Comma-separated graph IDs: g8,g9,g10,g11,g12,"
+                             "g_ee_rf,g_reward_gamma")
     args = parser.parse_args()
 
     if not os.path.isfile(args.data):
@@ -543,18 +710,13 @@ def main() -> None:
             return
         fn(data)
 
-    _do("g1",  plot_g1)
-    _do("g2",  plot_g2)
-    _do("g3",  plot_g3)
-    _do("g4",  plot_g4)
-    _do("g5",  plot_g5)
-    _do("g6",  plot_g6)
-    _do("g7",  plot_g7)
-    _do("g8",  plot_g8_ee_vs_ue)
-    _do("g9",  plot_g9_pdr_vs_ue)
-    _do("g10", plot_g10_goodness_vs_ue)
-    _do("g11", plot_g11_pdr_vs_arrival)
-    _do("g12", plot_g12_goodness_vs_sinr)
+    _do("g8",           plot_g8_ee_vs_ue)
+    _do("g9",           plot_g9_pdr_vs_ue)
+    _do("g11",          plot_g11_pdr_vs_arrival)
+    _do("g_ee_rf",      plot_g_ee_rf_vs_ue)
+    _do("g_tp_ue",      plot_g_tp_vs_ue)
+    _do("g_ee_uav",     plot_g_ee_vs_uav)
+    _do("g_reward_gamma", plot_g_reward_vs_gamma)
 
     print(f"\nAll graphs saved to {os.path.abspath(OUT_DIR)}/")
 
