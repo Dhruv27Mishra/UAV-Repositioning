@@ -20,8 +20,9 @@ rl_results*.json
 replot_from_checkpoints_meta.json
 summary_last_window.json
 
-# IDE (local only)
+# IDE / local tools
 .vscode/
+.claude/
 
 # Images: keep checked-in publication figures only
 *.png
