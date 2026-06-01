@@ -117,11 +117,10 @@ class MADDPG:
             action_probs = self.actors[agent_idx](state)[0]
             
             if explore:
-                # Add noise for exploration
                 action_probs = action_probs + torch.randn_like(action_probs) * 0.1
                 action_probs = F.softmax(action_probs, dim=0)
-            
-            return action_probs.multinomial(1).item()
+                return action_probs.multinomial(1).item()
+            return action_probs.argmax().item()
     
     def store_transition(self, states, actions, rewards, next_states, dones):
         """Store transition in replay buffer."""

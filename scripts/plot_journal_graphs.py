@@ -25,15 +25,15 @@ ALGO_NAMES = [
 GAMMAS = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
 
 COLORS: Dict[str, str] = {
-    "QMIX":               "#1f4e79",
-    "ABQMIX":             "#4682b4",
-    "IQL":                "#e67e22",
-    "VDN":                "#008080",
-    "MADDPG":             "#e88bb3",
-    "DMTD":               "#8b4513",
-    "DeepNashQ":          "#b8860b",
-    "PerformativeMFMARL": "#87ceeb",
-    "PerformativeMARL":   "#bdb76b",
+    "QMIX":               "#1f77b4",   # blue
+    "ABQMIX":             "#ff7f0e",   # orange
+    "IQL":                "#2ca02c",   # green
+    "VDN":                "#d62728",   # red
+    "MADDPG":             "#9467bd",   # purple
+    "DMTD":               "#8c564b",   # brown
+    "DeepNashQ":          "#e377c2",   # pink
+    "PerformativeMFMARL": "#17becf",   # cyan
+    "PerformativeMARL":   "#bcbd22",   # yellow-green
 }
 
 MARKERS: Dict[str, str] = {
@@ -49,7 +49,7 @@ MARKERS: Dict[str, str] = {
 }
 
 PROPOSED        = frozenset({"PerformativeMFMARL", "PerformativeMARL"})
-LINEWIDTH       = 1.8
+LINEWIDTH       = 1.2
 BAND_ALPHA      = 0.12
 FIG_SIZE        = (3.5, 2.8)
 DPI             = 300
@@ -260,8 +260,6 @@ def _plot_param_sweep(
         x_se_hi, y_se_hi = _smooth_param_curve(x_raw, means + se)
 
         ax.plot(x_sm, y_sm, color=color, linewidth=lw, label=algo, zorder=zo)
-        ax.fill_between(x_se_lo, y_se_lo, y_se_hi,
-                        color=color, alpha=BAND_ALPHA, zorder=zo - 1)
 
     ax.set_xlim(x_raw[0], x_raw[-1])
     if x_tick_labels:
@@ -438,22 +436,14 @@ def plot_g8_ee_vs_ue(data: Dict) -> None:
         print("G8: no data — run run_journal_experiments.py --only g_ue_sweep"); return
     d       = data["g_ue_sweep"]
     num_ues = d["num_ues"]
-    scaled  = {"num_ues": num_ues}
-    for algo in ALGO_NAMES:
-        if algo not in d: continue
-        adat = d[algo]
-        scaled[algo] = {**adat,
-            "ee_mean": [m / n for m, n in zip(adat["ee_mean"], num_ues)],
-            "ee_std":  [s / n for s, n in zip(adat["ee_std"],  num_ues)],
-        }
     _plot_param_sweep(
         xvals     = num_ues,
         mean_key  = "ee_mean",
         std_key   = "ee_std",
         seeds_key = "ee_seeds",
-        data      = scaled,
+        data      = d,
         xlabel    = "Number of UEs",
-        ylabel    = "Energy Efficiency per UE (Mbit/J/UE)",
+        ylabel    = "Energy Efficiency (Mbit/J)",
         title     = "Energy Efficiency vs. Number of UEs",
         out_name  = "energy_eff_vs_num_ue.png",
     )
@@ -596,22 +586,14 @@ def plot_g_tp_vs_ue(data: Dict) -> None:
     if "tp_mean" not in next((v for _, v in d.items() if isinstance(v, dict)), {}):
         print("TP_UE: tp_mean not in data — delete g_ue_sweep key and re-run"); return
     num_ues = d["num_ues"]
-    scaled  = {"num_ues": num_ues}
-    for algo in ALGO_NAMES:
-        if algo not in d: continue
-        adat = d[algo]
-        scaled[algo] = {**adat,
-            "tp_mean": [m / n for m, n in zip(adat["tp_mean"], num_ues)],
-            "tp_std":  [s / n for s, n in zip(adat["tp_std"],  num_ues)],
-        }
     _plot_param_sweep(
         xvals     = num_ues,
         mean_key  = "tp_mean",
         std_key   = "tp_std",
         seeds_key = "tp_seeds",
-        data      = scaled,
+        data      = d,
         xlabel    = "Number of UEs",
-        ylabel    = "Average Throughput per UE (Mbps/UE)",
+        ylabel    = "Average Throughput (Mbps)",
         title     = "Average Throughput vs. Number of UEs",
         out_name  = "throughput_vs_num_ue.png",
     )

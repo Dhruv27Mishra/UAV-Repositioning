@@ -56,12 +56,12 @@ STEPS_PER_EP = 100
 LOW_VEL_MAX  = 1.0
 HIGH_VEL_MIN = 5.0
 
-TRAIN_EPISODES    = 3000
+TRAIN_EPISODES    = 2000
 EVAL_RUNS         = 500
 N_SEEDS           = 5
 
 TRAIN_EPISODES_QUICK = 50
-EVAL_RUNS_QUICK      = 10
+EVAL_RUNS_QUICK      = 6
 N_SEEDS_QUICK        = 2
 
 _SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -116,13 +116,13 @@ def make_env(
     low_velocity_max:  float = LOW_VEL_MAX,
     high_velocity_min: float = HIGH_VEL_MIN,
     enhanced:          bool  = False,
-    min_user_rate:     float = 0.5,   # Mbps — QoS threshold swept in goodness-vs-SINR
+    min_user_rate:     float = 0.2,   # Mbps — QoS threshold swept in goodness-vs-SINR
     sinr_threshold_db: float = -5.0,  # SINR outage threshold (dB)
 ) -> MARLEnv:
     return MARLEnv(
         num_uavs=num_uavs, num_users=num_users, grid_size=GRID_SIZE,
         device=device, min_user_rate=min_user_rate, qos_bonus=10.0,
-        enable_non_stationary=enhanced, enable_performative=enhanced,
+        enable_non_stationary=True, enable_performative=enhanced,
         enable_signal_map_obs=True,
         traffic_model=traffic_model, pareto_shape=pareto_shape,
         pareto_scale=pareto_scale, traffic_load=traffic_load,
@@ -209,9 +209,9 @@ def create_agent(
     if name in ADAPTIVE_FAMILY:
         agent = AdaptiveNonStationaryMARL(
             num_agents=n, state_dim=sdim, action_dim=adim,
-            global_state_dim=gdim, context_dim=0,
-            learning_rate=1e-3, gamma=gamma, epsilon=0.1, device=device,
-            buffer_size=10000, batch_size=64, target_update=100)
+            global_state_dim=gdim, context_dim=7,
+            learning_rate=1e-3, gamma=gamma, epsilon=1.0, device=device,
+            buffer_size=10000, batch_size=64, target_update=50)
         # PerformativeMFMARL uses the improved association algorithm
         if name == "PerformativeMFMARL" and hasattr(env, "set_association_function"):
             env.set_association_function(agent.get_association_function())
@@ -317,6 +317,8 @@ def _run_episode(
             elif name == "DMTD":
                 agent.store_transitions(obs_np, actions,
                                         [reward] * num_uavs, nob, gstep + steps)
+                if steps % 2 == 0:
+                    agent.update(gstep + steps)
             else:
                 agent.store_transition(st, actions, [reward] * num_uavs,
                                        nst, [done] * num_uavs)
@@ -324,7 +326,7 @@ def _run_episode(
             if name == "ABQMIX":
                 agent.update()
             elif name == "DMTD":
-                agent.update(gstep + steps)
+                pass  # update handled above every 2 steps
             else:
                 buf = getattr(agent, "replay_buffer", None)
                 if buf is not None and len(buf) > getattr(agent, "batch_size", 64):
@@ -398,6 +400,8 @@ def train_and_save(
         _run_episode(algo, agent, env, device, sdim,
                      gstep=gstep, explore=True, post_reset_fn=_post)
         gstep += STEPS_PER_EP
+        if hasattr(agent, "decay_epsilon"):
+            agent.decay_epsilon()
 
     if hasattr(agent, "save"):
         try:
@@ -499,12 +503,6 @@ def _evaluate(
         gstep += STEPS_PER_EP
 
     return {k: float(np.mean(accum[k])) for k in metric_keys}
-
-
-# ─── G8: Energy Efficiency, PDR & Goodness vs. Number of UEs ─────────────────
-# Sweeps EVAL_NUM_UES; loads saved checkpoints (base model, gamma=0.99).
-# PDR = Σ_k max(0, d_k − r_k) / Σ_k d_k  (fraction of unserved demand, in %)
-# Goodness = 0.5·QoS_ratio + 0.3·Jain_fairness + 0.2·mean_rate_Mbps  (env def.)
 
 def run_g_ue_sweep(device: torch.device, quick: bool, algo_filter=None) -> Dict:
     print("\n=== G_UE: Energy Efficiency / PDR / Goodness vs. Number of UEs ===")

@@ -546,6 +546,7 @@ class MARLEnv(gym.Env):
             signal = tx_power_linear * gains_linear[k_star, j]
             interference = np.sum(tx_power_linear * gains_linear[:, j]) - signal
             sinr_interference[j] = signal / (noise_power_linear + interference)
+
         rates_interference = self.bandwidth * np.log2(1 + sinr_interference)
         # Zero out UEs whose SINR falls below threshold (outage condition)
         rates_interference[sinr_interference < self.sinr_threshold_linear] = 0.0
@@ -585,7 +586,7 @@ class MARLEnv(gym.Env):
 
         # "Goodness" (define it as you like; this is a reasonable default)
         # Mix QoS satisfaction + fairness + mean rate (scaled)
-        goodness = 0.5 * qos_ratio + 0.3 * float(fairness) + 0.2 * float(mean_rate / 1e6)
+        goodness = 0.4 * qos_ratio + 0.4 * float(fairness) + 0.2 * float(mean_rate / 1e6)
         # Collision check: if any two UAVs are too close
         collisions = False
         min_distance = 1.0  # Minimum allowed distance between UAVs
@@ -845,7 +846,7 @@ class MARLEnv(gym.Env):
             )
         
         # Add some exploration to avoid complete concentration
-        exploration_weight = 0.1
+        exploration_weight = 0.3
         uniform_dist = np.ones_like(self.ue_distribution_weights) / (
             self.grid_cells_x * self.grid_cells_y
         )

@@ -12,13 +12,65 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 import random
-from collections import deque
 from typing import List, Tuple, Dict
+
+
+class HybridPriorityReplayBuffer:
+    """
+    Hybrid Priority Experience Replay — same formulation as DMTD Algorithm 2.
+    p1(t) = 1 / rank(|delta|)   (TD-error rank priority)
+    p2(t) = exp(t_generate - t_current)  (recency priority)
+    p(t)  = gamma1 * p1 + gamma2 * p2
+    """
+    def __init__(self, capacity: int, gamma1: float = 0.5, gamma2: float = 0.5):
+        self.capacity = capacity
+        self.gamma1   = gamma1
+        self.gamma2   = gamma2
+        self.buffer: List[dict] = []
+        self._dirty   = True
+
+    def push(self, transition, t: int):
+        max_td = max((e["td_error"] for e in self.buffer), default=1.0)
+        self.buffer.append({"transition": transition, "td_error": max_td,
+                            "t_generate": t, "hybrid": 1.0})
+        if len(self.buffer) > self.capacity:
+            self.buffer.pop(0)
+        self._dirty = True
+
+    def _recompute_weights(self, current_t: int):
+        if not self._dirty or len(self.buffer) == 0:
+            return
+        td_errors = np.array([e["td_error"] for e in self.buffer])
+        ranks     = np.argsort(np.argsort(-td_errors)) + 1
+        p1        = 1.0 / ranks
+        t_gen     = np.array([e["t_generate"] for e in self.buffer], dtype=np.float64)
+        p2        = np.exp(np.clip(t_gen - current_t, -500.0, 0.0))
+        hybrid    = self.gamma1 * p1 + self.gamma2 * p2
+        for i, e in enumerate(self.buffer):
+            e["hybrid"] = float(hybrid[i])
+        self._dirty = False
+
+    def sample(self, k: int, current_t: int) -> Tuple[list, List[int]]:
+        self._recompute_weights(current_t)
+        weights = np.array([e["hybrid"] for e in self.buffer])
+        total   = weights.sum()
+        probs   = weights / total if total > 0 else np.ones(len(self.buffer)) / len(self.buffer)
+        idxs    = np.random.choice(len(self.buffer), size=k, replace=True, p=probs).tolist()
+        return [self.buffer[i]["transition"] for i in idxs], idxs
+
+    def update_td_errors(self, indices: List[int], new_errors: List[float], current_t: int):
+        for i, err in zip(indices, new_errors):
+            if i < len(self.buffer):
+                self.buffer[i]["td_error"] = abs(err)
+        self._dirty = True
+
+    def __len__(self):
+        return len(self.buffer)
 
 
 class ContextAwareQNetwork(nn.Module):
     """Q-network that takes state + non-stationary context."""
-    def __init__(self, state_dim: int, context_dim: int, action_dim: int, hidden_dim: int = 64):
+    def __init__(self, state_dim: int, context_dim: int, action_dim: int, hidden_dim: int = 128):
         super(ContextAwareQNetwork, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(state_dim + context_dim, hidden_dim),
@@ -35,7 +87,7 @@ class ContextAwareQNetwork(nn.Module):
 
 class ContextAwareMixingNetwork(nn.Module):
     """Mixing network that incorporates non-stationary context."""
-    def __init__(self, num_agents: int, global_state_dim: int, context_dim: int, hidden_dim: int = 64):
+    def __init__(self, num_agents: int, global_state_dim: int, context_dim: int, hidden_dim: int = 128):
         super(ContextAwareMixingNetwork, self).__init__()
         self.num_agents = num_agents
         input_dim = global_state_dim + context_dim
@@ -80,10 +132,10 @@ class ContextAwareMixingNetwork(nn.Module):
         # Second layer
         w2 = torch.abs(self.hyper_w2(combined_state))
         w2 = w2.view(batch_size, -1, 1)
-        b2 = self.hyper_b2(combined_state)
-        
+        b2 = self.hyper_b2(combined_state).view(batch_size, 1, 1)
+
         q_total = torch.bmm(hidden, w2) + b2
-        return q_total.squeeze()
+        return q_total.view(batch_size)
 
 
 class AdaptiveNonStationaryMARL:
@@ -96,10 +148,11 @@ class AdaptiveNonStationaryMARL:
     """
     def __init__(self, num_agents: int, state_dim: int, action_dim: int,
                  global_state_dim: int, context_dim: int = 7,  # 4 from non-stationary + 3 from UE mobility
-                 learning_rate: float = 0.001, gamma: float = 0.99, epsilon: float = 0.1,
+                 learning_rate: float = 0.001, gamma: float = 0.99, epsilon: float = 1.0,
+                 epsilon_min: float = 0.05, epsilon_decay: float = 0.998,
                  device: torch.device = None, buffer_size: int = 10000, batch_size: int = 64,
-                 target_update: int = 100):
-        
+                 target_update: int = 50):
+
         self.num_agents = num_agents
         self.state_dim = state_dim
         self.action_dim = action_dim
@@ -107,12 +160,15 @@ class AdaptiveNonStationaryMARL:
         self.context_dim = context_dim
         self.gamma = gamma
         self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
         self.device = device if device is not None else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
         self.target_update = target_update
         self.update_count = 0
-        
+        self._step_count  = 0
+
         # Context-aware Q-networks
         self.q_networks = [
             ContextAwareQNetwork(state_dim, context_dim, action_dim).to(self.device)
@@ -141,8 +197,8 @@ class AdaptiveNonStationaryMARL:
                             for net in self.q_networks]
         self.mixing_optimizer = optim.Adam(self.mixing_network.parameters(), lr=learning_rate)
         
-        # Replay buffer
-        self.replay_buffer = deque(maxlen=buffer_size)
+        # Hybrid Priority Replay buffer
+        self.replay_buffer = HybridPriorityReplayBuffer(buffer_size)
     
     @staticmethod
     def improved_association_algorithm(sinr: np.ndarray, rates: np.ndarray, 
@@ -284,27 +340,27 @@ class AdaptiveNonStationaryMARL:
                         rewards: List[float], next_states: List[torch.Tensor],
                         dones: List[bool], global_state: torch.Tensor,
                         next_global_state: torch.Tensor):
-        """Store transition with context."""
-        self.replay_buffer.append((
-            states, actions, rewards, next_states, dones,
-            global_state, next_global_state
-        ))
+        self.replay_buffer.push(
+            (states, actions, rewards, next_states, dones, global_state, next_global_state),
+            self._step_count
+        )
+        self._step_count += 1
     
     def update(self):
         """Update with context-aware learning."""
         if len(self.replay_buffer) < self.batch_size:
             return
         
-        # Sample batch
-        batch = random.sample(self.replay_buffer, self.batch_size)
-        states_batch = [torch.stack([b[0][i] for b in batch]).to(self.device) 
+        # Sample batch using HPER
+        batch, idxs = self.replay_buffer.sample(self.batch_size, self._step_count)
+        states_batch = [torch.stack([b[0][i] for b in batch]).to(self.device)
                        for i in range(self.num_agents)]
         actions_batch = torch.tensor([[b[1][i] for b in batch] for i in range(self.num_agents)]).to(self.device)
-        rewards_batch = torch.tensor([[b[2][i] for b in batch] for i in range(self.num_agents)], 
+        rewards_batch = torch.tensor([[b[2][i] for b in batch] for i in range(self.num_agents)],
                                      dtype=torch.float32).to(self.device)
-        next_states_batch = [torch.stack([b[3][i] for b in batch]).to(self.device) 
+        next_states_batch = [torch.stack([b[3][i] for b in batch]).to(self.device)
                             for i in range(self.num_agents)]
-        dones_batch = torch.tensor([[b[4][i] for b in batch] for i in range(self.num_agents)], 
+        dones_batch = torch.tensor([[b[4][i] for b in batch] for i in range(self.num_agents)],
                                    dtype=torch.bool).to(self.device)
         global_states_batch = torch.stack([b[5] for b in batch]).to(self.device)
         next_global_states_batch = torch.stack([b[6] for b in batch]).to(self.device)
@@ -319,12 +375,13 @@ class AdaptiveNonStationaryMARL:
             q_vals = self.q_networks[i](states_batch[i], contexts_batch)
             q_values.append(q_vals.gather(1, actions_batch[i].unsqueeze(1)))
         
-        # Compute target Q-values
+        # Compute target Q-values (Double DQN: online net selects, target net evaluates)
         with torch.no_grad():
             next_q_values = []
             for i in range(self.num_agents):
+                best_acts = self.q_networks[i](next_states_batch[i], next_contexts_batch).argmax(1)
                 next_q_vals = self.target_q_networks[i](next_states_batch[i], next_contexts_batch)
-                next_q_values.append(next_q_vals.max(1)[0])
+                next_q_values.append(next_q_vals.gather(1, best_acts.unsqueeze(1)).squeeze(1))
             
             # Mix Q-values
             next_q_vals_tensor = torch.stack(next_q_values, dim=1)
@@ -355,6 +412,10 @@ class AdaptiveNonStationaryMARL:
         torch.nn.utils.clip_grad_norm_(self.mixing_network.parameters(), 10)
         self.mixing_optimizer.step()
         
+        # Feed back TD errors to HPER
+        td_errors = (q_total - targets).detach().abs().cpu().numpy().tolist()
+        self.replay_buffer.update_td_errors(idxs, td_errors, self._step_count)
+
         # Update target networks
         if self.update_count % self.target_update == 0:
             for i in range(self.num_agents):
@@ -362,7 +423,10 @@ class AdaptiveNonStationaryMARL:
             self.target_mixing_network.load_state_dict(self.mixing_network.state_dict())
         
         self.update_count += 1
-    
+
+    def decay_epsilon(self):
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
     def save(self, filepath: str):
         """Save model."""
         torch.save({

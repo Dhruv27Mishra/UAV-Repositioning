@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import random
-import math
 from collections import deque
 from typing import List, Tuple, Optional
 
@@ -40,40 +39,49 @@ class QNetwork(nn.Module):
 class HybridPriorityReplayBuffer:
     def __init__(self, capacity: int, gamma1: float = 0.5, gamma2: float = 0.5):
         assert abs(gamma1 + gamma2 - 1.0) < 1e-6, "gamma1 + gamma2 must equal 1"
-        self.capacity = capacity
-        self.gamma1   = gamma1
-        self.gamma2   = gamma2
-        self.buffer: List[dict] = []
+        self.gamma1  = gamma1
+        self.gamma2  = gamma2
+        self.buffer  = deque(maxlen=capacity)
+        self._dirty  = True
 
     def push(self, state, action: int, reward: float,
              next_state, td_error: float, t: int):
-        entry = dict(state=state, action=action, reward=reward,
-                     next_state=next_state, td_error=abs(td_error),
-                     t_generate=t, p1=0.0, p2=1.0, hybrid=0.0)
-        self.buffer.append(entry)
-        if len(self.buffer) > self.capacity:
-            self.buffer.pop(0)
-        self._recompute_weights(t)
+        self.buffer.append(dict(state=state, action=action, reward=reward,
+                                next_state=next_state, td_error=abs(td_error),
+                                t_generate=t, hybrid=1.0))
+        self._dirty = True
 
-    def _recompute_weights(self, current_t: int):
-        sorted_buf = sorted(self.buffer, key=lambda x: x["td_error"], reverse=True)
-        for rank, e in enumerate(sorted_buf, start=1):
-            e["p1"]     = 1.0 / rank
-            e["p2"]     = math.exp(-(current_t - e["t_generate"]))
-            e["hybrid"] = self.gamma1 * e["p1"] + self.gamma2 * e["p2"]
+    def _recompute_weights(self, current_t: int, buf: list):
+        if not self._dirty:
+            return
+        n = len(buf)
+        if n == 0:
+            return
+        td_errors = np.array([e["td_error"] for e in buf])
+        ranks     = np.argsort(np.argsort(-td_errors)) + 1
+        p1        = 1.0 / ranks
+        t_gen     = np.array([e["t_generate"] for e in buf], dtype=np.float64)
+        p2        = np.exp(np.clip(t_gen - current_t, -500.0, 0.0))
+        hybrid    = self.gamma1 * p1 + self.gamma2 * p2
+        for i, e in enumerate(buf):
+            e["hybrid"] = float(hybrid[i])
+        self._dirty = False
 
     def sample(self, k: int, current_t: int) -> Tuple[List[dict], List[int]]:
-        self._recompute_weights(current_t)
-        total = sum(e["hybrid"] for e in self.buffer)
-        probs = [e["hybrid"] / total for e in self.buffer]
-        idxs  = random.choices(range(len(self.buffer)), weights=probs, k=k)
-        return [self.buffer[i] for i in idxs], idxs
+        buf = list(self.buffer)          # single copy shared with recompute
+        self._recompute_weights(current_t, buf)
+        weights = np.array([e["hybrid"] for e in buf])
+        total   = weights.sum()
+        probs   = weights / total if total > 0 else np.ones(len(buf)) / len(buf)
+        idxs    = np.random.choice(len(buf), size=k, replace=True, p=probs).tolist()
+        return [buf[i] for i in idxs], idxs
 
     def update_td_errors(self, indices: List[int],
                          new_errors: List[float], current_t: int):
         for i, err in zip(indices, new_errors):
-            self.buffer[i]["td_error"] = abs(err)
-        self._recompute_weights(current_t)
+            if i < len(self.buffer):
+                self.buffer[i]["td_error"] = abs(err)
+        self._dirty = True
 
     def __len__(self):
         return len(self.buffer)
@@ -160,11 +168,12 @@ class DMTD:
         """Store one transition per UAV. Returns per-UAV |delta| values."""
         td_errors = []
         for i in range(self.num_uavs):
-            td = self._compute_td_error(i, states[i], actions[i],
-                                        rewards[i], next_states[i])
-            self.replay_buffers[i].push(
-                states[i], actions[i], rewards[i], next_states[i], td, t)
-            td_errors.append(td)
+            # Use max existing priority for new transitions (avoids 2 forward
+            # passes per UAV per step; TD error corrected at next update)
+            buf = self.replay_buffers[i]
+            max_td = max((e["td_error"] for e in buf.buffer), default=1.0)
+            buf.push(states[i], actions[i], rewards[i], next_states[i], max_td, t)
+            td_errors.append(max_td)
         return td_errors
 
     # ── one gradient step per UAV  (Algorithm 2) ─────────────────────────────
